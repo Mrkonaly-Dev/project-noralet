@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "project-noralet"
+version = "0.1.0"
+description = "A deterministic simulation foundation for Project Noralet"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+noralet = "noralet.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
