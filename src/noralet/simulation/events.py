@@ -94,6 +94,7 @@ class NoraletDeathCause(StrEnum):
     """Machine-readable causes currently implemented by the simulation."""
 
     WORLD_BOUNDARY = "world_boundary"
+    ENERGY_DEPLETION = "energy_depletion"
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +178,73 @@ class EnergyPointDissolved:
         _validate_transition(self.tick_before, self.tick_after)
 
 
+@dataclass(frozen=True, slots=True)
+class EnergyConsumed:
+    """Records Consumable Energy transferred into one Noralet."""
+
+    noralet_id: int
+    point_id: int
+    energy_transferred: float
+    tick_before: int
+    tick_after: int
+
+    def __post_init__(self) -> None:
+        _validate_noralet_id(self.noralet_id)
+        _validate_point_id(self.point_id)
+        _validate_finite("energy_transferred", self.energy_transferred)
+        if self.energy_transferred <= 0.0:
+            raise ValueError("consumed energy transfer must be positive")
+        _validate_transition(self.tick_before, self.tick_after)
+
+
+class NoraletEnergyExpenditureReason(StrEnum):
+    """Machine-readable reasons for Noralet-to-environment transfers."""
+
+    EXISTENCE = "existence"
+    ACCELERATION = "acceleration"
+
+
+@dataclass(frozen=True, slots=True)
+class NoraletEnergySpent:
+    """Records Noralet Energy expended into a local environmental pool."""
+
+    noralet_id: int
+    region_id: str
+    reason: NoraletEnergyExpenditureReason
+    energy_transferred: float
+    tick_before: int
+    tick_after: int
+
+    def __post_init__(self) -> None:
+        _validate_noralet_id(self.noralet_id)
+        _validate_region_id(self.region_id)
+        if not isinstance(self.reason, NoraletEnergyExpenditureReason):
+            raise TypeError("reason must be a NoraletEnergyExpenditureReason")
+        _validate_finite("energy_transferred", self.energy_transferred)
+        if self.energy_transferred <= 0.0:
+            raise ValueError("spent energy transfer must be positive")
+        _validate_transition(self.tick_before, self.tick_after)
+
+
+@dataclass(frozen=True, slots=True)
+class NoraletEnergyReleased:
+    """Records remaining Noralet Energy returned on death."""
+
+    noralet_id: int
+    region_id: str
+    energy_transferred: float
+    tick_before: int
+    tick_after: int
+
+    def __post_init__(self) -> None:
+        _validate_noralet_id(self.noralet_id)
+        _validate_region_id(self.region_id)
+        _validate_finite("energy_transferred", self.energy_transferred)
+        if self.energy_transferred <= 0.0:
+            raise ValueError("released energy transfer must be positive")
+        _validate_transition(self.tick_before, self.tick_after)
+
+
 SimulationEvent: TypeAlias = (
     TickAdvanced
     | NoraletAccelerated
@@ -185,4 +253,7 @@ SimulationEvent: TypeAlias = (
     | EnergyPointFormed
     | EnergyPointDecayed
     | EnergyPointDissolved
+    | EnergyConsumed
+    | NoraletEnergySpent
+    | NoraletEnergyReleased
 )

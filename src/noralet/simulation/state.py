@@ -105,4 +105,5 @@ class WorldState:
                 pool.energy for pool in self.environmental_energy
             ),
             consumable_energy=math.fsum(point.energy for point in self.energy_points),
+            noralet_energy=math.fsum(body.energy for body in self.bodies),
         )

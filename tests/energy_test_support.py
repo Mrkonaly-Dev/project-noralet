@@ -28,6 +28,7 @@ def ecology_config(
     formation_max: float = 4.0,
     decay_rate: float = 0.25,
     removal_threshold: float = 0.1,
+    minimum_spacing: float = 0.0,
 ) -> EnergyEcologyConfig:
     """Build a compact explicit energy ecology for tests."""
 
@@ -39,4 +40,5 @@ def ecology_config(
         formation_energy_max=formation_max,
         decay_rate=decay_rate,
         point_removal_threshold=removal_threshold,
+        minimum_energy_point_spacing=minimum_spacing,
     )

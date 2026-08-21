@@ -6,11 +6,12 @@ import math
 
 @dataclass(frozen=True, slots=True)
 class NoraletBodyState:
-    """Simulation identity, position and velocity for one living body."""
+    """Simulation identity, position, velocity and stored physical energy."""
 
     noralet_id: int
     position: float
     velocity: float = 0.0
+    energy: float = 0.0
 
     def __post_init__(self) -> None:
         if type(self.noralet_id) is not int:
@@ -18,8 +19,12 @@ class NoraletBodyState:
 
         position = self._finite_float("position", self.position)
         velocity = self._finite_float("velocity", self.velocity)
+        energy = self._finite_float("energy", self.energy)
+        if energy < 0.0:
+            raise ValueError("Noralet energy cannot be negative")
         object.__setattr__(self, "position", position)
         object.__setattr__(self, "velocity", velocity)
+        object.__setattr__(self, "energy", energy)
 
     @staticmethod
     def _finite_float(name: str, value: float) -> float:

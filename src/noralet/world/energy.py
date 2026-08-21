@@ -60,14 +60,21 @@ class ConsumableEnergyPoint:
 
 @dataclass(frozen=True, slots=True)
 class EnergyTotals:
-    """Observer-safe totals for the two energy forms in Iteration 3."""
+    """Observer-safe totals for all implemented fundamental energy forms."""
 
     environmental_energy: float
     consumable_energy: float
+    noralet_energy: float = 0.0
 
     @property
     def total_energy(self) -> float:
-        return math.fsum((self.environmental_energy, self.consumable_energy))
+        return math.fsum(
+            (
+                self.environmental_energy,
+                self.consumable_energy,
+                self.noralet_energy,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +118,7 @@ class EnergyEcologyConfig:
     formation_energy_max: float
     decay_rate: float
     point_removal_threshold: float
+    minimum_energy_point_spacing: float = 0.0
 
     def __post_init__(self) -> None:
         try:
@@ -166,12 +174,24 @@ class EnergyEcologyConfig:
                 "point_removal_threshold must be below formation_energy_min"
             )
 
+        minimum_spacing = _finite_float(
+            "minimum_energy_point_spacing",
+            self.minimum_energy_point_spacing,
+        )
+        if minimum_spacing < 0.0:
+            raise ValueError("minimum_energy_point_spacing cannot be negative")
+
         object.__setattr__(self, "regions", ordered_regions)
         object.__setattr__(self, "initial_environmental_energy", ordered_pools)
         object.__setattr__(self, "formation_energy_min", formation_min)
         object.__setattr__(self, "formation_energy_max", formation_max)
         object.__setattr__(self, "decay_rate", decay_rate)
         object.__setattr__(self, "point_removal_threshold", threshold)
+        object.__setattr__(
+            self,
+            "minimum_energy_point_spacing",
+            minimum_spacing,
+        )
 
     def validate_world_partition(
         self,
@@ -209,4 +229,3 @@ class EnergyEcologyConfig:
 
 class EnergyConservationError(RuntimeError):
     """Raised before publication when the closed energy total changes."""
-

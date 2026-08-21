@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import math
 
+from noralet.noralets.energy import NoraletEnergyConfig
 from noralet.world.energy import EnergyEcologyConfig
 
 
@@ -14,6 +15,7 @@ class SimulationConfig:
     left_boundary: float = -100.0
     right_boundary: float = 100.0
     energy_ecology: EnergyEcologyConfig | None = None
+    noralet_energy: NoraletEnergyConfig | None = None
 
     def __post_init__(self) -> None:
         if type(self.master_seed) is not int:
@@ -34,6 +36,22 @@ class SimulationConfig:
                 left_boundary,
                 right_boundary,
             )
+
+        if self.noralet_energy is not None:
+            if not isinstance(self.noralet_energy, NoraletEnergyConfig):
+                raise TypeError("noralet_energy must be a NoraletEnergyConfig")
+            if self.energy_ecology is None:
+                raise ValueError(
+                    "Noralet Energy requires an active EnergyEcologyConfig"
+                )
+            if (
+                self.energy_ecology.minimum_energy_point_spacing
+                <= 2.0 * self.noralet_energy.consume_radius
+            ):
+                raise ValueError(
+                    "minimum_energy_point_spacing must be greater than "
+                    "twice consume_radius"
+                )
 
     @staticmethod
     def _finite_float(name: str, value: float) -> float:
