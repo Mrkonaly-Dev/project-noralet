@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="noralet")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = subparsers.add_parser("run", help="run an empty simulation")
+    run_parser = subparsers.add_parser("run", help="run a headless simulation")
     run_parser.add_argument(
         "--ticks",
         required=True,
@@ -55,4 +55,3 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     raise AssertionError(f"Unhandled command: {args.command}")
-

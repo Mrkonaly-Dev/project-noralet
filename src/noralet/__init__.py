@@ -1,7 +1,13 @@
 """Project Noralet simulation package."""
 
 from noralet.simulation import (
+    ActionIntent,
     DeterministicRandomStreams,
+    NoraletAccelerated,
+    NoraletBodyState,
+    NoraletDeathCause,
+    NoraletDied,
+    NoraletMoved,
     Simulation,
     SimulationConfig,
     SimulationEvent,
@@ -11,7 +17,13 @@ from noralet.simulation import (
 )
 
 __all__ = [
+    "ActionIntent",
     "DeterministicRandomStreams",
+    "NoraletAccelerated",
+    "NoraletBodyState",
+    "NoraletDeathCause",
+    "NoraletDied",
+    "NoraletMoved",
     "Simulation",
     "SimulationConfig",
     "SimulationEvent",
@@ -19,4 +31,3 @@ __all__ = [
     "TickResult",
     "WorldState",
 ]
-
