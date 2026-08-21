@@ -20,7 +20,23 @@ def _validate_noralet_id(noralet_id: int) -> None:
         raise TypeError("noralet_id must be an integer")
 
 
+def _validate_point_id(point_id: int) -> None:
+    if type(point_id) is not int:
+        raise TypeError("point_id must be an integer")
+    if point_id < 0:
+        raise ValueError("point_id cannot be negative")
+
+
+def _validate_region_id(region_id: str) -> None:
+    if not isinstance(region_id, str):
+        raise TypeError("region_id must be a string")
+    if not region_id:
+        raise ValueError("region_id cannot be empty")
+
+
 def _validate_finite(name: str, value: float) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a real number")
     if not math.isfinite(value):
         raise ValueError(f"{name} must be finite")
 
@@ -98,6 +114,75 @@ class NoraletDied:
         _validate_transition(self.tick_before, self.tick_after)
 
 
+@dataclass(frozen=True, slots=True)
+class EnergyPointFormed:
+    """Records Environmental Energy transferred into a new point."""
+
+    region_id: str
+    point_id: int
+    position: float
+    energy: float
+    tick_before: int
+    tick_after: int
+
+    def __post_init__(self) -> None:
+        _validate_region_id(self.region_id)
+        _validate_point_id(self.point_id)
+        _validate_finite("position", self.position)
+        _validate_finite("energy", self.energy)
+        if self.energy <= 0.0:
+            raise ValueError("formed energy must be positive")
+        _validate_transition(self.tick_before, self.tick_after)
+
+
+@dataclass(frozen=True, slots=True)
+class EnergyPointDecayed:
+    """Records proportional energy returned by one existing point."""
+
+    region_id: str
+    point_id: int
+    energy_returned: float
+    remaining_energy: float
+    tick_before: int
+    tick_after: int
+
+    def __post_init__(self) -> None:
+        _validate_region_id(self.region_id)
+        _validate_point_id(self.point_id)
+        _validate_finite("energy_returned", self.energy_returned)
+        _validate_finite("remaining_energy", self.remaining_energy)
+        if self.energy_returned <= 0.0:
+            raise ValueError("decayed energy transfer must be positive")
+        if self.remaining_energy < 0.0:
+            raise ValueError("remaining energy cannot be negative")
+        _validate_transition(self.tick_before, self.tick_after)
+
+
+@dataclass(frozen=True, slots=True)
+class EnergyPointDissolved:
+    """Records point removal and return of its complete final remainder."""
+
+    region_id: str
+    point_id: int
+    energy_returned: float
+    tick_before: int
+    tick_after: int
+
+    def __post_init__(self) -> None:
+        _validate_region_id(self.region_id)
+        _validate_point_id(self.point_id)
+        _validate_finite("energy_returned", self.energy_returned)
+        if self.energy_returned < 0.0:
+            raise ValueError("dissolved energy transfer cannot be negative")
+        _validate_transition(self.tick_before, self.tick_after)
+
+
 SimulationEvent: TypeAlias = (
-    TickAdvanced | NoraletAccelerated | NoraletMoved | NoraletDied
+    TickAdvanced
+    | NoraletAccelerated
+    | NoraletMoved
+    | NoraletDied
+    | EnergyPointFormed
+    | EnergyPointDecayed
+    | EnergyPointDissolved
 )

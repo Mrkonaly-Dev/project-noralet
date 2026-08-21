@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 import math
 
+from noralet.world.energy import EnergyEcologyConfig
+
 
 @dataclass(frozen=True, slots=True)
 class SimulationConfig:
@@ -11,6 +13,7 @@ class SimulationConfig:
     master_seed: int
     left_boundary: float = -100.0
     right_boundary: float = 100.0
+    energy_ecology: EnergyEcologyConfig | None = None
 
     def __post_init__(self) -> None:
         if type(self.master_seed) is not int:
@@ -23,6 +26,14 @@ class SimulationConfig:
 
         object.__setattr__(self, "left_boundary", left_boundary)
         object.__setattr__(self, "right_boundary", right_boundary)
+
+        if self.energy_ecology is not None:
+            if not isinstance(self.energy_ecology, EnergyEcologyConfig):
+                raise TypeError("energy_ecology must be an EnergyEcologyConfig")
+            self.energy_ecology.validate_world_partition(
+                left_boundary,
+                right_boundary,
+            )
 
     @staticmethod
     def _finite_float(name: str, value: float) -> float:
