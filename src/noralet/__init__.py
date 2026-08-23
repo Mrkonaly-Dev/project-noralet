@@ -18,6 +18,7 @@ from noralet.simulation import (
     NoraletDeathCause,
     NoraletDied,
     NoraletEnergyConfig,
+    NoraletPhysiologyConfig,
     NoraletEnergyExpenditureReason,
     NoraletEnergyReleased,
     NoraletEnergySpent,
@@ -30,6 +31,9 @@ from noralet.simulation import (
     TickAdvanced,
     TickResult,
     WorldState,
+    condition_after_tick,
+    mortality_hazard,
+    natural_death_probability,
 )
 
 __all__ = [
@@ -54,6 +58,7 @@ __all__ = [
     "NoraletEnergyReleased",
     "NoraletEnergySpent",
     "NoraletMoved",
+    "NoraletPhysiologyConfig",
     "RegionDefinition",
     "RegionKind",
     "Simulation",
@@ -62,4 +67,7 @@ __all__ = [
     "TickAdvanced",
     "TickResult",
     "WorldState",
+    "condition_after_tick",
+    "mortality_hazard",
+    "natural_death_probability",
 ]

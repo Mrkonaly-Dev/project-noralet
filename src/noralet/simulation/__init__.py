@@ -1,6 +1,14 @@
 """Public API for the deterministic simulation runtime."""
 
-from noralet.noralets import ActionIntent, NoraletBodyState, NoraletEnergyConfig
+from noralet.noralets import (
+    ActionIntent,
+    NoraletBodyState,
+    NoraletEnergyConfig,
+    NoraletPhysiologyConfig,
+    condition_after_tick,
+    mortality_hazard,
+    natural_death_probability,
+)
 from noralet.simulation.config import SimulationConfig
 from noralet.simulation.events import (
     EnergyConsumed,
@@ -54,6 +62,7 @@ __all__ = [
     "NoraletEnergyReleased",
     "NoraletEnergySpent",
     "NoraletMoved",
+    "NoraletPhysiologyConfig",
     "RegionDefinition",
     "RegionKind",
     "Simulation",
@@ -62,4 +71,7 @@ __all__ = [
     "TickAdvanced",
     "TickResult",
     "WorldState",
+    "condition_after_tick",
+    "mortality_hazard",
+    "natural_death_probability",
 ]

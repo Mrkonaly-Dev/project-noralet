@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 
 from noralet.noralets.energy import NoraletEnergyConfig
+from noralet.noralets.physiology import NoraletPhysiologyConfig
 from noralet.world.energy import EnergyEcologyConfig
 
 
@@ -16,6 +17,7 @@ class SimulationConfig:
     right_boundary: float = 100.0
     energy_ecology: EnergyEcologyConfig | None = None
     noralet_energy: NoraletEnergyConfig | None = None
+    noralet_physiology: NoraletPhysiologyConfig | None = None
 
     def __post_init__(self) -> None:
         if type(self.master_seed) is not int:
@@ -51,6 +53,16 @@ class SimulationConfig:
                 raise ValueError(
                     "minimum_energy_point_spacing must be greater than "
                     "twice consume_radius"
+                )
+
+        if self.noralet_physiology is not None:
+            if not isinstance(self.noralet_physiology, NoraletPhysiologyConfig):
+                raise TypeError(
+                    "noralet_physiology must be a NoraletPhysiologyConfig"
+                )
+            if self.noralet_energy is None:
+                raise ValueError(
+                    "Noralet physiology requires an active NoraletEnergyConfig"
                 )
 
     @staticmethod

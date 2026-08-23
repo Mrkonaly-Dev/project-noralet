@@ -95,11 +95,12 @@ class NoraletDeathCause(StrEnum):
 
     WORLD_BOUNDARY = "world_boundary"
     ENERGY_DEPLETION = "energy_depletion"
+    NATURAL = "natural"
 
 
 @dataclass(frozen=True, slots=True)
 class NoraletDied:
-    """Records removal of a body that crossed a world boundary."""
+    """Records removal of a body during one resolved transition."""
 
     noralet_id: int
     cause: NoraletDeathCause

@@ -9,6 +9,10 @@ import math
 from noralet.noralets.actions import ActionIntent
 from noralet.noralets.body import NoraletBodyState
 from noralet.noralets.energy import NoraletEnergyConfig
+from noralet.noralets.physiology import (
+    condition_after_tick,
+    natural_death_probability,
+)
 from noralet.simulation.config import SimulationConfig
 from noralet.simulation.events import (
     EnergyConsumed,
@@ -343,6 +347,8 @@ class Simulation:
                 position=positions_after[body.noralet_id],
                 velocity=velocities_after[body.noralet_id],
                 energy=body.energy,
+                age_ticks=body.age_ticks,
+                condition=body.condition,
             )
             for body in state_before.bodies
             if self._is_inside_world(positions_after[body.noralet_id])
@@ -381,7 +387,7 @@ class Simulation:
         state_before: WorldState,
         action_intents: Mapping[int, ActionIntent],
     ) -> tuple[WorldState, tuple[SimulationEvent, ...]]:
-        """Resolve the complete Iteration 4 transfer and physics sequence."""
+        """Resolve energy, physics, physiology and ecology in canonical phases."""
 
         energy_config = self.config.noralet_energy
         ecology = self.config.energy_ecology
@@ -518,7 +524,7 @@ class Simulation:
             if body.noralet_id in death_causes
         )
 
-        release_events: list[NoraletEnergyReleased] = []
+        deterministic_release_events: list[NoraletEnergyReleased] = []
         for body in state_before.bodies:
             if body.noralet_id not in death_causes:
                 continue
@@ -534,7 +540,71 @@ class Simulation:
                 destination = ecology.region_for(resolved_position)
             environmental_transfers[destination.region_id].append(energy_released)
             noralet_energy[body.noralet_id] = 0.0
-            release_events.append(
+            deterministic_release_events.append(
+                NoraletEnergyReleased(
+                    noralet_id=body.noralet_id,
+                    region_id=destination.region_id,
+                    energy_transferred=energy_released,
+                    tick_before=state_before.tick,
+                    tick_after=tick_after,
+                )
+            )
+
+        candidate_ages: dict[int, int] = {}
+        candidate_conditions: dict[int, float] = {}
+        natural_death_ids: set[int] = set()
+        physiology = self.config.noralet_physiology
+        for body in state_before.bodies:
+            if body.noralet_id in death_causes:
+                continue
+            if physiology is None:
+                candidate_ages[body.noralet_id] = body.age_ticks
+                candidate_conditions[body.noralet_id] = body.condition
+                continue
+
+            candidate_age = body.age_ticks + 1
+            candidate_condition = condition_after_tick(
+                body.condition,
+                noralet_energy[body.noralet_id],
+                energy_config.energy_capacity,
+                physiology,
+            )
+            candidate_ages[body.noralet_id] = candidate_age
+            candidate_conditions[body.noralet_id] = candidate_condition
+            probability = natural_death_probability(
+                candidate_age,
+                candidate_condition,
+                physiology,
+            )
+            mortality_roll = self.random_streams.stream(
+                self._mortality_stream_name(body.noralet_id)
+            ).random()
+            if mortality_roll < probability:
+                natural_death_ids.add(body.noralet_id)
+
+        natural_death_events = tuple(
+            NoraletDied(
+                noralet_id=body.noralet_id,
+                cause=NoraletDeathCause.NATURAL,
+                resolved_position=positions_after[body.noralet_id],
+                tick_before=state_before.tick,
+                tick_after=tick_after,
+            )
+            for body in state_before.bodies
+            if body.noralet_id in natural_death_ids
+        )
+
+        natural_release_events: list[NoraletEnergyReleased] = []
+        for body in state_before.bodies:
+            if body.noralet_id not in natural_death_ids:
+                continue
+            energy_released = noralet_energy[body.noralet_id]
+            if energy_released <= 0.0:
+                continue
+            destination = ecology.region_for(positions_after[body.noralet_id])
+            environmental_transfers[destination.region_id].append(energy_released)
+            noralet_energy[body.noralet_id] = 0.0
+            natural_release_events.append(
                 NoraletEnergyReleased(
                     noralet_id=body.noralet_id,
                     region_id=destination.region_id,
@@ -550,9 +620,12 @@ class Simulation:
                 position=positions_after[body.noralet_id],
                 velocity=velocities_after[body.noralet_id],
                 energy=noralet_energy[body.noralet_id],
+                age_ticks=candidate_ages[body.noralet_id],
+                condition=candidate_conditions[body.noralet_id],
             )
             for body in state_before.bodies
             if body.noralet_id not in death_causes
+            and body.noralet_id not in natural_death_ids
         )
 
         pools_before = {
@@ -598,7 +671,9 @@ class Simulation:
             *acceleration_events,
             *movement_events,
             *death_events,
-            *release_events,
+            *deterministic_release_events,
+            *natural_death_events,
+            *natural_release_events,
             *ecology_events,
         )
         return state_after, events
@@ -949,6 +1024,11 @@ class Simulation:
     @staticmethod
     def _energy_stream_name(region_id: str, purpose: str) -> str:
         return f"energy:region:{len(region_id)}:{region_id}:formation:{purpose}"
+
+    @staticmethod
+    def _mortality_stream_name(noralet_id: int) -> str:
+        stable_id = str(noralet_id)
+        return f"mortality:noralet:{len(stable_id)}:{stable_id}"
 
     @staticmethod
     def _validate_resolved_values(
