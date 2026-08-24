@@ -4,6 +4,7 @@ from noralet.noralets import (
     ActionIntent,
     ExternalPercept,
     Interoception,
+    NoraletActuatorConfig,
     NoraletBodyState,
     NoraletEnergyConfig,
     NoraletExperience,
@@ -19,6 +20,7 @@ from noralet.noralets import (
     mortality_hazard,
     natural_death_probability,
 )
+from noralet.simulation.experience import RoutedNoraletExperience
 from noralet.simulation.config import SimulationConfig
 from noralet.simulation.events import (
     EnergyConsumed,
@@ -68,6 +70,7 @@ __all__ = [
     "ExternalPercept",
     "FormationProbabilities",
     "Interoception",
+    "NoraletActuatorConfig",
     "NoraletAccelerated",
     "NoraletBodyState",
     "NoraletDeathCause",
@@ -83,6 +86,7 @@ __all__ = [
     "NoraletSignalConfig",
     "RegionDefinition",
     "RegionKind",
+    "RoutedNoraletExperience",
     "Simulation",
     "SimulationConfig",
     "SimulationEvent",

@@ -7,6 +7,7 @@ from noralet.simulation import (
     ConsumableEnergyPoint,
     EnvironmentalEnergyPool,
     FormationProbabilities,
+    NoraletActuatorConfig,
     NoraletBodyState,
     NoraletEnergyConfig,
     NoraletExperienceConfig,
@@ -46,6 +47,7 @@ def noralet_energy_simulation(
     physiology: NoraletPhysiologyConfig | None = None,
     experience: NoraletExperienceConfig | None = None,
     signals: NoraletSignalConfig | None = None,
+    actuators: NoraletActuatorConfig | None = None,
 ) -> Simulation:
     """Construct one fully explicit energy-enabled simulation."""
 
@@ -76,6 +78,7 @@ def noralet_energy_simulation(
             noralet_physiology=physiology,
             noralet_experience=experience,
             noralet_signals=signals,
+            noralet_actuators=actuators,
         ),
         initial_bodies=bodies,
         initial_energy_points=points,

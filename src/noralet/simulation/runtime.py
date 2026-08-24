@@ -37,6 +37,7 @@ from noralet.simulation.experience import (
     _ExperienceBuilder,
     _NEUTRAL_TRANSITION_FEEDBACK,
     _TransitionFeedback,
+    RoutedNoraletExperience,
 )
 from noralet.simulation.randomness import DeterministicRandomStreams
 from noralet.simulation.state import WorldState
@@ -180,13 +181,25 @@ class Simulation:
     def experiences_for_all(self) -> tuple[NoraletExperience, ...]:
         """Return all current experiences in stable living-identity order."""
 
+        return tuple(
+            routed.experience for routed in self.routed_experiences_for_all()
+        )
+
+    def routed_experiences_for_all(
+        self,
+    ) -> tuple[RoutedNoraletExperience, ...]:
+        """Return coordinator routing identities outside Experience values."""
+
         if self._experience_builder is None:
             raise RuntimeError("Noralet experience is not enabled")
         return tuple(
-            self._experience_builder.build(
-                self._state,
-                body,
-                self._transition_feedback[body.noralet_id],
+            RoutedNoraletExperience(
+                noralet_id=body.noralet_id,
+                experience=self._experience_builder.build(
+                    self._state,
+                    body,
+                    self._transition_feedback[body.noralet_id],
+                ),
             )
             for body in self._state.bodies
         )
@@ -382,7 +395,9 @@ class Simulation:
         tick_after = state_before.tick + 1
         accelerations = {
             body.noralet_id: (
-                action_intents[body.noralet_id].acceleration
+                self._body_limited_acceleration(
+                    action_intents[body.noralet_id].acceleration
+                )
                 if body.noralet_id in action_intents
                 else 0.0
             )
@@ -535,7 +550,9 @@ class Simulation:
         coefficient = energy_config.acceleration_energy_cost_per_unit
         for body in state_before.bodies:
             requested = (
-                action_intents[body.noralet_id].acceleration
+                self._body_limited_acceleration(
+                    action_intents[body.noralet_id].acceleration
+                )
                 if body.noralet_id in action_intents
                 else 0.0
             )
@@ -1238,3 +1255,10 @@ class Simulation:
 
     def _is_inside_world(self, position: float) -> bool:
         return self.config.left_boundary <= position <= self.config.right_boundary
+
+    def _body_limited_acceleration(self, requested: float) -> float:
+        actuator = self.config.noralet_actuators
+        if actuator is None:
+            return requested
+        maximum = actuator.max_acceleration
+        return min(maximum, max(-maximum, requested))

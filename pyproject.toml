@@ -8,11 +8,20 @@ version = "0.1.0"
 description = "A deterministic simulation foundation for Project Noralet"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "torch>=2.13.0",
+]
 
 [project.scripts]
 noralet = "noralet.cli:main"
 
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
 [tool.setuptools.packages.find]
 where = ["src"]
-

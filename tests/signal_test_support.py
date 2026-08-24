@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from noralet.simulation import (
     EnvironmentalEnergyPool,
+    NoraletActuatorConfig,
     NoraletBodyState,
     NoraletPhysiologyConfig,
     NoraletSignalConfig,
@@ -60,6 +61,7 @@ def signal_simulation(
     physiology: NoraletPhysiologyConfig | None = None,
     vision_radius: float = 5.0,
     seed: int = 20260825,
+    actuator: NoraletActuatorConfig | None = None,
 ) -> Simulation:
     """Construct a signal-enabled simulation with neutral physiology."""
 
@@ -73,5 +75,6 @@ def signal_simulation(
         physiology=physiology or physiology_config(baseline_loss=0.0),
         experience=experience_config(vision_radius=vision_radius),
         signals=signal or signal_config(),
+        actuators=actuator,
         seed=seed,
     )

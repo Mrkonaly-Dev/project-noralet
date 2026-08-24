@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 
 from noralet.noralets.energy import NoraletEnergyConfig
+from noralet.noralets.actuators import NoraletActuatorConfig
 from noralet.noralets.experience import NoraletExperienceConfig
 from noralet.noralets.physiology import NoraletPhysiologyConfig
 from noralet.noralets.signals import NoraletSignalConfig
@@ -22,6 +23,7 @@ class SimulationConfig:
     noralet_physiology: NoraletPhysiologyConfig | None = None
     noralet_experience: NoraletExperienceConfig | None = None
     noralet_signals: NoraletSignalConfig | None = None
+    noralet_actuators: NoraletActuatorConfig | None = None
 
     def __post_init__(self) -> None:
         if type(self.master_seed) is not int:
@@ -90,6 +92,12 @@ class SimulationConfig:
                 raise ValueError(
                     "Noralet signals require active Energy, ecology and experience"
                 )
+
+        if self.noralet_actuators is not None and not isinstance(
+            self.noralet_actuators,
+            NoraletActuatorConfig,
+        ):
+            raise TypeError("noralet_actuators must be a NoraletActuatorConfig")
 
     @staticmethod
     def _finite_float(name: str, value: float) -> float:

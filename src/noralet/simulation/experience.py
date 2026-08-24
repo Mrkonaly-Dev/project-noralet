@@ -79,6 +79,20 @@ _NEUTRAL_TRANSITION_FEEDBACK = _TransitionFeedback()
 
 
 @dataclass(frozen=True, slots=True)
+class RoutedNoraletExperience:
+    """Coordinator-only identity paired with an unchanged brain-facing value."""
+
+    noralet_id: int
+    experience: NoraletExperience
+
+    def __post_init__(self) -> None:
+        if type(self.noralet_id) is not int:
+            raise TypeError("noralet_id must be an integer")
+        if not isinstance(self.experience, NoraletExperience):
+            raise TypeError("experience must be a NoraletExperience")
+
+
+@dataclass(frozen=True, slots=True)
 class _ExperienceBuilder:
     """Engine-side deterministic boundary hiding objective world semantics."""
 
