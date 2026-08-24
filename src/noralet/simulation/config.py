@@ -6,6 +6,7 @@ import math
 from noralet.noralets.energy import NoraletEnergyConfig
 from noralet.noralets.experience import NoraletExperienceConfig
 from noralet.noralets.physiology import NoraletPhysiologyConfig
+from noralet.noralets.signals import NoraletSignalConfig
 from noralet.world.energy import EnergyEcologyConfig
 
 
@@ -20,6 +21,7 @@ class SimulationConfig:
     noralet_energy: NoraletEnergyConfig | None = None
     noralet_physiology: NoraletPhysiologyConfig | None = None
     noralet_experience: NoraletExperienceConfig | None = None
+    noralet_signals: NoraletSignalConfig | None = None
 
     def __post_init__(self) -> None:
         if type(self.master_seed) is not int:
@@ -75,6 +77,18 @@ class SimulationConfig:
             if self.noralet_energy is None or self.noralet_physiology is None:
                 raise ValueError(
                     "Noralet experience requires active Noralet Energy and physiology"
+                )
+
+        if self.noralet_signals is not None:
+            if not isinstance(self.noralet_signals, NoraletSignalConfig):
+                raise TypeError("noralet_signals must be a NoraletSignalConfig")
+            if (
+                self.energy_ecology is None
+                or self.noralet_energy is None
+                or self.noralet_experience is None
+            ):
+                raise ValueError(
+                    "Noralet signals require active Energy, ecology and experience"
                 )
 
     @staticmethod

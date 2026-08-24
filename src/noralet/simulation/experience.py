@@ -12,6 +12,12 @@ from noralet.noralets.experience import (
     NoraletExperience,
     NoraletExperienceConfig,
     SensorimotorFeedback,
+    SignalPercept,
+)
+from noralet.noralets.signals import (
+    NoraletSignalConfig,
+    SignalDirection,
+    SignalType,
 )
 from noralet.simulation.state import WorldState
 
@@ -27,6 +33,8 @@ class _TransitionFeedback:
     consume_attempt_executed: bool = False
     consumed_energy: float = 0.0
     actual_energy_expenditure: float = 0.0
+    executed_signal_type: SignalType | None = None
+    executed_signal_direction: SignalDirection | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -47,6 +55,24 @@ class _TransitionFeedback:
             raise ValueError("consumed_energy cannot be negative")
         if self.actual_energy_expenditure < 0.0:
             raise ValueError("actual_energy_expenditure cannot be negative")
+        if self.executed_signal_type is not None and not isinstance(
+            self.executed_signal_type,
+            SignalType,
+        ):
+            raise TypeError("executed_signal_type must be a SignalType or None")
+        if self.executed_signal_direction is not None and not isinstance(
+            self.executed_signal_direction,
+            SignalDirection,
+        ):
+            raise TypeError(
+                "executed_signal_direction must be a SignalDirection or None"
+            )
+        if (self.executed_signal_type is None) != (
+            self.executed_signal_direction is None
+        ):
+            raise ValueError(
+                "executed signal type and direction must be present together"
+            )
 
 
 _NEUTRAL_TRANSITION_FEEDBACK = _TransitionFeedback()
@@ -57,6 +83,7 @@ class _ExperienceBuilder:
     """Engine-side deterministic boundary hiding objective world semantics."""
 
     config: NoraletExperienceConfig
+    signal_config: NoraletSignalConfig | None
     energy_capacity: float
     left_boundary: float
     right_boundary: float
@@ -71,6 +98,7 @@ class _ExperienceBuilder:
 
         return NoraletExperience(
             external_percepts=self._external_percepts(state, body),
+            signal_percepts=self._signal_percepts(state, body),
             interoception=self._interoception(body, feedback),
             sensorimotor_feedback=self._sensorimotor_feedback(feedback),
         )
@@ -148,6 +176,55 @@ class _ExperienceBuilder:
         percepts.sort(key=lambda item: item[0])
         return tuple(percept for _, percept in percepts)
 
+    def _signal_percepts(
+        self,
+        state: WorldState,
+        observer: NoraletBodyState,
+    ) -> tuple[SignalPercept, ...]:
+        signal_config = self.signal_config
+        if signal_config is None:
+            return ()
+
+        percepts: list[SignalPercept] = []
+        for signal in state.active_signals:
+            if signal.sender_noralet_id == observer.noralet_id:
+                continue
+            if (
+                signal.emission_direction is SignalDirection.RIGHT
+                and observer.position < signal.origin
+            ) or (
+                signal.emission_direction is SignalDirection.LEFT
+                and observer.position > signal.origin
+            ):
+                continue
+            distance = abs(observer.position - signal.origin)
+            if distance > signal_config.signal_radius:
+                continue
+            relative_origin = signal.origin - observer.position
+            if relative_origin < 0.0:
+                direction = -1.0
+            elif relative_origin > 0.0:
+                direction = 1.0
+            else:
+                direction = 0.0
+            strength = 1.0 - distance / signal_config.signal_radius
+            percepts.append(
+                SignalPercept(
+                    signal_pattern=signal_config.pattern_for(signal.signal_type),
+                    direction_signal=direction,
+                    strength_signal=min(1.0, max(0.0, strength)),
+                )
+            )
+
+        percepts.sort(
+            key=lambda percept: (
+                percept.direction_signal,
+                percept.strength_signal,
+                percept.signal_pattern,
+            )
+        )
+        return tuple(percepts)
+
     def _external_percept(
         self,
         *,
@@ -202,6 +279,26 @@ class _ExperienceBuilder:
             motor_direction = 1.0
         else:
             motor_direction = 0.0
+        signal_config = self.signal_config
+        if signal_config is None:
+            emission_activation = 0.0
+            emission_pattern: tuple[float, ...] = ()
+            emission_direction = 0.0
+        elif feedback.executed_signal_type is None:
+            emission_activation = 0.0
+            emission_pattern = (0.0,) * signal_config.signal_pattern_length
+            emission_direction = 0.0
+        else:
+            assert feedback.executed_signal_direction is not None
+            emission_activation = 1.0
+            emission_pattern = signal_config.pattern_for(
+                feedback.executed_signal_type
+            )
+            emission_direction = (
+                -1.0
+                if feedback.executed_signal_direction is SignalDirection.LEFT
+                else 1.0
+            )
         return SensorimotorFeedback(
             motor_direction=motor_direction,
             motor_effort=self._saturating_sensation(
@@ -213,6 +310,9 @@ class _ExperienceBuilder:
                 feedback.consumed_energy,
                 self.config.ingestion_sensation_scale,
             ),
+            signal_emission_activation=emission_activation,
+            signal_emission_pattern=emission_pattern,
+            signal_emission_direction=emission_direction,
         )
 
     @staticmethod

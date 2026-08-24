@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 
 from noralet.noralets.body import NoraletBodyState
+from noralet.world.signals import ActiveSignal
 from noralet.world.energy import (
     ConsumableEnergyPoint,
     EnergyTotals,
@@ -20,6 +21,7 @@ class WorldState:
     environmental_energy: tuple[EnvironmentalEnergyPool, ...] = ()
     energy_points: tuple[ConsumableEnergyPoint, ...] = ()
     next_energy_point_id: int = 0
+    active_signals: tuple[ActiveSignal, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.tick) is not int:
@@ -68,9 +70,28 @@ class WorldState:
         if point_ids and self.next_energy_point_id <= max(point_ids):
             raise ValueError("next_energy_point_id must exceed existing point IDs")
 
+        if not isinstance(self.active_signals, tuple):
+            raise TypeError("active_signals must be an immutable tuple")
+        if not all(
+            isinstance(signal, ActiveSignal) for signal in self.active_signals
+        ):
+            raise TypeError("every active signal must be an ActiveSignal")
+        ordered_signals = tuple(
+            sorted(
+                self.active_signals,
+                key=lambda signal: signal.sender_noralet_id,
+            )
+        )
+        sender_ids = tuple(
+            signal.sender_noralet_id for signal in ordered_signals
+        )
+        if len(sender_ids) != len(set(sender_ids)):
+            raise ValueError("one Noralet cannot own multiple active signals")
+
         object.__setattr__(self, "bodies", ordered_bodies)
         object.__setattr__(self, "environmental_energy", ordered_pools)
         object.__setattr__(self, "energy_points", ordered_points)
+        object.__setattr__(self, "active_signals", ordered_signals)
 
     def body(self, noralet_id: int) -> NoraletBodyState:
         """Return one living body, or raise ``KeyError`` if it is absent."""

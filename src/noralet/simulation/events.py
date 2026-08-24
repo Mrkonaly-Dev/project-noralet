@@ -5,6 +5,8 @@ from enum import StrEnum
 import math
 from typing import TypeAlias
 
+from noralet.noralets.signals import SignalDirection, SignalType
+
 
 def _validate_transition(tick_before: int, tick_after: int) -> None:
     if type(tick_before) is not int or type(tick_after) is not int:
@@ -203,6 +205,7 @@ class NoraletEnergyExpenditureReason(StrEnum):
 
     EXISTENCE = "existence"
     ACCELERATION = "acceleration"
+    SIGNAL = "signal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +249,27 @@ class NoraletEnergyReleased:
         _validate_transition(self.tick_before, self.tick_after)
 
 
+@dataclass(frozen=True, slots=True)
+class SignalEmitted:
+    """Records one successfully executed physical signal emission."""
+
+    noralet_id: int
+    signal_type: SignalType
+    emission_direction: SignalDirection
+    origin: float
+    tick_before: int
+    tick_after: int
+
+    def __post_init__(self) -> None:
+        _validate_noralet_id(self.noralet_id)
+        if not isinstance(self.signal_type, SignalType):
+            raise TypeError("signal_type must be a SignalType")
+        if not isinstance(self.emission_direction, SignalDirection):
+            raise TypeError("emission_direction must be a SignalDirection")
+        _validate_finite("origin", self.origin)
+        _validate_transition(self.tick_before, self.tick_after)
+
+
 SimulationEvent: TypeAlias = (
     TickAdvanced
     | NoraletAccelerated
@@ -257,4 +281,5 @@ SimulationEvent: TypeAlias = (
     | EnergyConsumed
     | NoraletEnergySpent
     | NoraletEnergyReleased
+    | SignalEmitted
 )

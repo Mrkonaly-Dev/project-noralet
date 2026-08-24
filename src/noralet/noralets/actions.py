@@ -3,13 +3,16 @@
 from dataclasses import dataclass
 import math
 
+from noralet.noralets.signals import SignalEmissionIntent
+
 
 @dataclass(frozen=True, slots=True)
 class ActionIntent:
-    """Request acceleration and optionally attempt local energy consumption."""
+    """Request physical actions for one lockstep transition."""
 
     acceleration: float = 0.0
     consume: bool = False
+    signal_emission: SignalEmissionIntent | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.acceleration, bool) or not isinstance(
@@ -22,4 +25,11 @@ class ActionIntent:
             raise ValueError("acceleration must be finite")
         if type(self.consume) is not bool:
             raise TypeError("consume must be a boolean")
+        if self.signal_emission is not None and not isinstance(
+            self.signal_emission,
+            SignalEmissionIntent,
+        ):
+            raise TypeError(
+                "signal_emission must be a SignalEmissionIntent or None"
+            )
         object.__setattr__(self, "acceleration", acceleration)

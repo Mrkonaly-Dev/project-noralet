@@ -6,6 +6,7 @@ from noralet.simulation import (
     ConsumableEnergyPoint,
     NoraletBodyState,
     NoraletExperienceConfig,
+    NoraletSignalConfig,
     Simulation,
 )
 from noralet_energy_test_support import noralet_energy_simulation
@@ -48,6 +49,7 @@ def experience_simulation(
     acceleration_cost: float = 0.0,
     consume_radius: float = 1.0,
     seed: int = 20260824,
+    signals: NoraletSignalConfig | None = None,
 ) -> Simulation:
     """Construct an experience-enabled simulation with neutral physiology."""
 
@@ -60,5 +62,6 @@ def experience_simulation(
         consume_radius=consume_radius,
         physiology=physiology_config(baseline_loss=0.0),
         experience=experience or experience_config(),
+        signals=signals,
         seed=seed,
     )

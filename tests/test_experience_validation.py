@@ -13,6 +13,7 @@ from noralet import (
     NoraletExperience,
     NoraletExperienceConfig,
     SensorimotorFeedback,
+    SignalPercept,
 )
 from noralet.simulation import NoraletBodyState, Simulation, SimulationConfig
 from noralet_energy_test_support import noralet_energy_simulation
@@ -178,11 +179,20 @@ class SignatureAndExperienceValueTests(unittest.TestCase):
     def test_brain_facing_structures_have_only_the_intended_fields(self) -> None:
         self.assertEqual(
             tuple(field.name for field in fields(NoraletExperience)),
-            ("external_percepts", "interoception", "sensorimotor_feedback"),
+            (
+                "external_percepts",
+                "signal_percepts",
+                "interoception",
+                "sensorimotor_feedback",
+            ),
         )
         self.assertEqual(
             tuple(field.name for field in fields(ExternalPercept)),
             ("appearance_pattern", "direction_signal", "proximity_signal"),
+        )
+        self.assertEqual(
+            tuple(field.name for field in fields(SignalPercept)),
+            ("signal_pattern", "direction_signal", "strength_signal"),
         )
         self.assertEqual(
             tuple(field.name for field in fields(Interoception)),
@@ -195,6 +205,9 @@ class SignatureAndExperienceValueTests(unittest.TestCase):
                 "motor_effort",
                 "consume_activation",
                 "ingestion_signal",
+                "signal_emission_activation",
+                "signal_emission_pattern",
+                "signal_emission_direction",
             ),
         )
 

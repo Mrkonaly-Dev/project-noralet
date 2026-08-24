@@ -9,7 +9,12 @@ from noralet.noralets import (
     NoraletExperience,
     NoraletExperienceConfig,
     NoraletPhysiologyConfig,
+    NoraletSignalConfig,
     SensorimotorFeedback,
+    SignalDirection,
+    SignalEmissionIntent,
+    SignalPercept,
+    SignalType,
     condition_after_tick,
     mortality_hazard,
     natural_death_probability,
@@ -27,6 +32,7 @@ from noralet.simulation.events import (
     NoraletEnergyReleased,
     NoraletEnergySpent,
     NoraletMoved,
+    SignalEmitted,
     SimulationEvent,
     TickAdvanced,
 )
@@ -35,6 +41,7 @@ from noralet.simulation.runtime import Simulation
 from noralet.simulation.state import WorldState
 from noralet.simulation.tick import TickResult
 from noralet.world import (
+    ActiveSignal,
     ConsumableEnergyPoint,
     EnergyConservationError,
     EnergyEcologyConfig,
@@ -47,6 +54,7 @@ from noralet.world import (
 
 __all__ = [
     "ActionIntent",
+    "ActiveSignal",
     "ConsumableEnergyPoint",
     "DeterministicRandomStreams",
     "EnergyConservationError",
@@ -72,12 +80,18 @@ __all__ = [
     "NoraletExperienceConfig",
     "NoraletMoved",
     "NoraletPhysiologyConfig",
+    "NoraletSignalConfig",
     "RegionDefinition",
     "RegionKind",
     "Simulation",
     "SimulationConfig",
     "SimulationEvent",
     "SensorimotorFeedback",
+    "SignalDirection",
+    "SignalEmissionIntent",
+    "SignalEmitted",
+    "SignalPercept",
+    "SignalType",
     "TickAdvanced",
     "TickResult",
     "WorldState",

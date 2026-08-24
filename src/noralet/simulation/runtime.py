@@ -15,6 +15,7 @@ from noralet.noralets.physiology import (
     condition_after_tick,
     natural_death_probability,
 )
+from noralet.noralets.signals import SignalEmissionIntent
 from noralet.simulation.config import SimulationConfig
 from noralet.simulation.events import (
     EnergyConsumed,
@@ -28,6 +29,7 @@ from noralet.simulation.events import (
     NoraletEnergyReleased,
     NoraletEnergySpent,
     NoraletMoved,
+    SignalEmitted,
     SimulationEvent,
     TickAdvanced,
 )
@@ -39,6 +41,7 @@ from noralet.simulation.experience import (
 from noralet.simulation.randomness import DeterministicRandomStreams
 from noralet.simulation.state import WorldState
 from noralet.simulation.tick import TickResult
+from noralet.world.signals import ActiveSignal
 from noralet.world.energy import (
     ConsumableEnergyPoint,
     EnergyConservationError,
@@ -119,6 +122,7 @@ class Simulation:
             assert energy_config is not None
             self._experience_builder = _ExperienceBuilder(
                 config=experience_config,
+                signal_config=self.config.noralet_signals,
                 energy_capacity=energy_config.energy_capacity,
                 left_boundary=self.config.left_boundary,
                 right_boundary=self.config.right_boundary,
@@ -321,8 +325,8 @@ class Simulation:
                     f"have length {experience.signature_length}"
                 )
 
-    @staticmethod
     def _validate_action_intents(
+        self,
         state_before: WorldState,
         action_intents: Mapping[int, ActionIntent] | None,
     ) -> dict[int, ActionIntent]:
@@ -342,6 +346,12 @@ class Simulation:
         if unknown_ids:
             unknown = ", ".join(str(noralet_id) for noralet_id in unknown_ids)
             raise ValueError(f"action intent targets non-living Noralet ID(s): {unknown}")
+        if self.config.noralet_signals is None and any(
+            intent.signal_emission is not None for intent in intents.values()
+        ):
+            raise ValueError(
+                "signal emission requests require an active NoraletSignalConfig"
+            )
 
         return intents
 
@@ -562,6 +572,56 @@ class Simulation:
                     )
                 )
 
+        executed_signal_emissions: dict[int, SignalEmissionIntent] = {}
+        active_signals: list[ActiveSignal] = []
+        signal_expenditure_events: list[NoraletEnergySpent] = []
+        signal_emission_events: list[SignalEmitted] = []
+        signal_config = self.config.noralet_signals
+        if signal_config is not None:
+            signal_cost = signal_config.signal_energy_cost
+            for body in state_before.bodies:
+                intent = action_intents.get(body.noralet_id)
+                emission = None if intent is None else intent.signal_emission
+                if (
+                    emission is None
+                    or noralet_energy[body.noralet_id] < signal_cost
+                ):
+                    continue
+                executed_signal_emissions[body.noralet_id] = emission
+                if signal_cost > 0.0:
+                    noralet_energy[body.noralet_id] -= signal_cost
+                    actual_energy_expenditure[body.noralet_id] += signal_cost
+                    region = ecology.region_for(body.position)
+                    environmental_transfers[region.region_id].append(signal_cost)
+                    signal_expenditure_events.append(
+                        NoraletEnergySpent(
+                            noralet_id=body.noralet_id,
+                            region_id=region.region_id,
+                            reason=NoraletEnergyExpenditureReason.SIGNAL,
+                            energy_transferred=signal_cost,
+                            tick_before=state_before.tick,
+                            tick_after=tick_after,
+                        )
+                    )
+                active_signals.append(
+                    ActiveSignal(
+                        sender_noralet_id=body.noralet_id,
+                        signal_type=emission.signal_type,
+                        origin=body.position,
+                        emission_direction=emission.direction,
+                    )
+                )
+                signal_emission_events.append(
+                    SignalEmitted(
+                        noralet_id=body.noralet_id,
+                        signal_type=emission.signal_type,
+                        emission_direction=emission.direction,
+                        origin=body.position,
+                        tick_before=state_before.tick,
+                        tick_after=tick_after,
+                    )
+                )
+
         velocities_after = {
             body.noralet_id: body.velocity + applied_accelerations[body.noralet_id]
             for body in state_before.bodies
@@ -755,11 +815,14 @@ class Simulation:
             environmental_energy=environmental_energy,
             energy_points=energy_points,
             next_energy_point_id=next_energy_point_id,
+            active_signals=tuple(active_signals),
         )
         events: tuple[SimulationEvent, ...] = (
             *consumption_events,
             *existence_events,
             *acceleration_events_spent,
+            *signal_expenditure_events,
+            *signal_emission_events,
             *acceleration_events,
             *movement_events,
             *death_events,
@@ -781,6 +844,16 @@ class Simulation:
                     actual_energy_expenditure=actual_energy_expenditure[
                         body.noralet_id
                     ],
+                    executed_signal_type=(
+                        executed_signal_emissions[body.noralet_id].signal_type
+                        if body.noralet_id in executed_signal_emissions
+                        else None
+                    ),
+                    executed_signal_direction=(
+                        executed_signal_emissions[body.noralet_id].direction
+                        if body.noralet_id in executed_signal_emissions
+                        else None
+                    ),
                 )
                 for body in surviving_bodies
             }

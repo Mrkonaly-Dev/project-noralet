@@ -9,12 +9,19 @@ from noralet.noralets.experience import (
     NoraletExperience,
     NoraletExperienceConfig,
     SensorimotorFeedback,
+    SignalPercept,
 )
 from noralet.noralets.physiology import (
     NoraletPhysiologyConfig,
     condition_after_tick,
     mortality_hazard,
     natural_death_probability,
+)
+from noralet.noralets.signals import (
+    NoraletSignalConfig,
+    SignalDirection,
+    SignalEmissionIntent,
+    SignalType,
 )
 
 __all__ = [
@@ -26,7 +33,12 @@ __all__ = [
     "NoraletExperience",
     "NoraletExperienceConfig",
     "NoraletPhysiologyConfig",
+    "NoraletSignalConfig",
     "SensorimotorFeedback",
+    "SignalDirection",
+    "SignalEmissionIntent",
+    "SignalPercept",
+    "SignalType",
     "condition_after_tick",
     "mortality_hazard",
     "natural_death_probability",

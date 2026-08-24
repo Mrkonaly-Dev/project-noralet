@@ -162,6 +162,35 @@ class ExternalPercept:
 
 
 @dataclass(frozen=True, slots=True)
+class SignalPercept:
+    """Meaningless signal pattern with source direction and bounded strength."""
+
+    signal_pattern: tuple[float, ...]
+    direction_signal: float
+    strength_signal: float
+
+    def __post_init__(self) -> None:
+        pattern = _finite_vector("signal_pattern", self.signal_pattern)
+        if not pattern:
+            raise ValueError("signal_pattern cannot be empty")
+        object.__setattr__(self, "signal_pattern", pattern)
+        object.__setattr__(
+            self,
+            "direction_signal",
+            _direction_signal("direction_signal", self.direction_signal),
+        )
+        object.__setattr__(
+            self,
+            "strength_signal",
+            _unit_signal(
+                "strength_signal",
+                self.strength_signal,
+                upper_inclusive=True,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Interoception:
     """Derived current bodily distress and recent expenditure sensation."""
 
@@ -207,6 +236,9 @@ class SensorimotorFeedback:
     motor_effort: float
     consume_activation: float
     ingestion_signal: float
+    signal_emission_activation: float = 0.0
+    signal_emission_pattern: tuple[float, ...] = ()
+    signal_emission_direction: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -239,6 +271,51 @@ class SensorimotorFeedback:
                 upper_inclusive=False,
             ),
         )
+        emission_activation = _finite_float(
+            "signal_emission_activation",
+            self.signal_emission_activation,
+        )
+        if emission_activation not in (0.0, 1.0):
+            raise ValueError("signal_emission_activation must be 0 or 1")
+        emission_pattern = _finite_vector(
+            "signal_emission_pattern",
+            self.signal_emission_pattern,
+        )
+        emission_direction = _direction_signal(
+            "signal_emission_direction",
+            self.signal_emission_direction,
+        )
+        if emission_activation == 0.0:
+            if any(value != 0.0 for value in emission_pattern):
+                raise ValueError(
+                    "inactive signal emission pattern must be neutral"
+                )
+            if emission_direction != 0.0:
+                raise ValueError(
+                    "inactive signal emission direction must be neutral"
+                )
+        else:
+            if not emission_pattern:
+                raise ValueError("active signal emission pattern cannot be empty")
+            if emission_direction not in (-1.0, 1.0):
+                raise ValueError(
+                    "active signal emission direction must be -1 or 1"
+                )
+        object.__setattr__(
+            self,
+            "signal_emission_activation",
+            emission_activation,
+        )
+        object.__setattr__(
+            self,
+            "signal_emission_pattern",
+            emission_pattern,
+        )
+        object.__setattr__(
+            self,
+            "signal_emission_direction",
+            emission_direction,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +323,7 @@ class NoraletExperience:
     """Complete immutable brain-facing experience without routing identity."""
 
     external_percepts: tuple[ExternalPercept, ...]
+    signal_percepts: tuple[SignalPercept, ...]
     interoception: Interoception
     sensorimotor_feedback: SensorimotorFeedback
 
@@ -257,6 +335,12 @@ class NoraletExperience:
             for percept in self.external_percepts
         ):
             raise TypeError("every external percept must be an ExternalPercept")
+        if not isinstance(self.signal_percepts, tuple):
+            raise TypeError("signal_percepts must be an immutable tuple")
+        if not all(
+            isinstance(percept, SignalPercept) for percept in self.signal_percepts
+        ):
+            raise TypeError("every signal percept must be a SignalPercept")
         if not isinstance(self.interoception, Interoception):
             raise TypeError("interoception must be an Interoception")
         if not isinstance(self.sensorimotor_feedback, SensorimotorFeedback):
