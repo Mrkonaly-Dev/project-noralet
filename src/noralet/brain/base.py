@@ -10,7 +10,10 @@ import torch
 from torch import Tensor
 
 from noralet.brain.config import NoraletBrainConfig, resolve_brain_device
-from noralet.brain.learning import NoraletLearningConfig
+from noralet.brain.learning import (
+    NoraletHomeostaticPlasticityConfig,
+    NoraletLearningConfig,
+)
 from noralet.brain.model import NoraletBrainModel
 from noralet.noralets.actuators import NoraletActuatorConfig
 from noralet.noralets.experience import NoraletExperienceConfig
@@ -31,6 +34,9 @@ class BaseBrain:
         signal_config: NoraletSignalConfig,
         actuator_config: NoraletActuatorConfig,
         learning_config: NoraletLearningConfig | None = None,
+        homeostatic_plasticity_config: (
+            NoraletHomeostaticPlasticityConfig | None
+        ) = None,
     ) -> None:
         if not isinstance(config, NoraletBrainConfig):
             raise TypeError("config must be a NoraletBrainConfig")
@@ -47,9 +53,26 @@ class BaseBrain:
             NoraletLearningConfig,
         ):
             raise TypeError("learning_config must be a NoraletLearningConfig")
+        if homeostatic_plasticity_config is not None and not isinstance(
+            homeostatic_plasticity_config,
+            NoraletHomeostaticPlasticityConfig,
+        ):
+            raise TypeError(
+                "homeostatic_plasticity_config must be a "
+                "NoraletHomeostaticPlasticityConfig"
+            )
+        if (
+            homeostatic_plasticity_config is not None
+            and config.acceleration_exploration_std <= 0.0
+        ):
+            raise ValueError(
+                "homeostatic action plasticity requires positive "
+                "acceleration_exploration_std"
+            )
 
         self.config = config
         self.learning_config = learning_config
+        self.homeostatic_plasticity_config = homeostatic_plasticity_config
         self.actuator_config = actuator_config
         self.external_pattern_length = experience_config.appearance_length
         self.signal_pattern_length = signal_config.signal_pattern_length
@@ -108,6 +131,7 @@ class BaseBrain:
             model=model,
             config=self.config,
             learning_config=self.learning_config,
+            homeostatic_plasticity_config=self.homeostatic_plasticity_config,
             actuator_config=self.actuator_config,
             device=self.device,
             action_random_source=action_random_source,

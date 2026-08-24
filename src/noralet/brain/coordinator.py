@@ -36,12 +36,54 @@ class NoraletLearningResult:
 
 
 @dataclass(frozen=True, slots=True)
+class NoraletHomeostaticLearningResult:
+    """Observer-only metrics for one internal-modulation action update."""
+
+    noralet_id: int
+    homeostatic_drive_before: float
+    homeostatic_drive_after: float
+    modulation: float
+    eligibility_norm: float
+    applied_update_norm: float
+
+    def __post_init__(self) -> None:
+        if type(self.noralet_id) is not int:
+            raise TypeError("noralet_id must be an integer")
+        for name in ("homeostatic_drive_before", "homeostatic_drive_after"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a real number")
+            converted = float(value)
+            if not math.isfinite(converted) or not 0.0 <= converted <= 1.0:
+                raise ValueError(f"{name} must be finite and in [0, 1]")
+            object.__setattr__(self, name, converted)
+        modulation = self.modulation
+        if isinstance(modulation, bool) or not isinstance(modulation, (int, float)):
+            raise TypeError("modulation must be a real number")
+        modulation_value = float(modulation)
+        if not math.isfinite(modulation_value) or not -1.0 < modulation_value < 1.0:
+            raise ValueError("modulation must be finite and between -1 and 1")
+        object.__setattr__(self, "modulation", modulation_value)
+        for name in ("eligibility_norm", "applied_update_norm"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a real number")
+            converted = float(value)
+            if not math.isfinite(converted) or converted < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
+            object.__setattr__(self, name, converted)
+
+
+@dataclass(frozen=True, slots=True)
 class AutonomousTickResult:
     """Observer-facing neural intentions and the resolved physical transition."""
 
     action_intents: tuple[tuple[int, ActionIntent], ...]
     tick_result: TickResult
     learning_results: tuple[NoraletLearningResult, ...] = ()
+    homeostatic_learning_results: (
+        tuple[NoraletHomeostaticLearningResult, ...]
+    ) = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.action_intents, tuple):
@@ -77,6 +119,24 @@ class AutonomousTickResult:
             raise ValueError(
                 "learning results must have unique canonical identities"
             )
+        if not isinstance(self.homeostatic_learning_results, tuple):
+            raise TypeError(
+                "homeostatic_learning_results must be an immutable tuple"
+            )
+        homeostatic_ids: list[int] = []
+        for result in self.homeostatic_learning_results:
+            if not isinstance(result, NoraletHomeostaticLearningResult):
+                raise TypeError(
+                    "every homeostatic result must be a "
+                    "NoraletHomeostaticLearningResult"
+                )
+            homeostatic_ids.append(result.noralet_id)
+        if homeostatic_ids != sorted(homeostatic_ids) or len(
+            homeostatic_ids
+        ) != len(set(homeostatic_ids)):
+            raise ValueError(
+                "homeostatic results must have unique canonical identities"
+            )
 
     def action_for(self, noralet_id: int) -> ActionIntent:
         if type(noralet_id) is not int:
@@ -90,6 +150,17 @@ class AutonomousTickResult:
         if type(noralet_id) is not int:
             raise TypeError("noralet_id must be an integer")
         for result in self.learning_results:
+            if result.noralet_id == noralet_id:
+                return result
+        raise KeyError(noralet_id)
+
+    def homeostatic_learning_for(
+        self,
+        noralet_id: int,
+    ) -> NoraletHomeostaticLearningResult:
+        if type(noralet_id) is not int:
+            raise TypeError("noralet_id must be an integer")
+        for result in self.homeostatic_learning_results:
             if result.noralet_id == noralet_id:
                 return result
         raise KeyError(noralet_id)
@@ -154,7 +225,7 @@ class AutonomousSimulationRunner:
         routed_experiences = self._simulation.routed_experiences_for_all()
         living_ids = {routed.noralet_id for routed in routed_experiences}
         for dead_id in tuple(set(self._brains) - living_ids):
-            self._brains[dead_id].discard_pending_transition()
+            self._brains[dead_id].discard_lifetime_state()
             del self._brains[dead_id]
         missing_ids = living_ids - set(self._brains)
         if missing_ids:
@@ -185,35 +256,56 @@ class AutonomousSimulationRunner:
         next_experiences = self._simulation.routed_experiences_for_all()
         surviving_ids = {routed.noralet_id for routed in next_experiences}
         for dead_id in tuple(set(self._brains) - surviving_ids):
-            self._brains[dead_id].discard_pending_transition()
+            self._brains[dead_id].discard_lifetime_state()
             del self._brains[dead_id]
 
         learning_results: list[NoraletLearningResult] = []
+        homeostatic_results: list[NoraletHomeostaticLearningResult] = []
         try:
             for routed in next_experiences:
                 brain = self._brains[routed.noralet_id]
-                if not brain.learning_enabled:
-                    continue
-                result = brain.learn(routed.experience)
-                learning_results.append(
-                    NoraletLearningResult(
-                        noralet_id=routed.noralet_id,
-                        prediction_loss=result.prediction_loss,
-                        gradient_norm=result.gradient_norm,
+                if brain.learning_enabled:
+                    result = brain.learn(routed.experience)
+                    learning_results.append(
+                        NoraletLearningResult(
+                            noralet_id=routed.noralet_id,
+                            prediction_loss=result.prediction_loss,
+                            gradient_norm=result.gradient_norm,
+                        )
                     )
-                )
+                if brain.homeostatic_learning_enabled:
+                    homeostatic_result = brain.apply_homeostatic_update(
+                        routed.experience
+                    )
+                    homeostatic_results.append(
+                        NoraletHomeostaticLearningResult(
+                            noralet_id=routed.noralet_id,
+                            homeostatic_drive_before=(
+                                homeostatic_result.homeostatic_drive_before
+                            ),
+                            homeostatic_drive_after=(
+                                homeostatic_result.homeostatic_drive_after
+                            ),
+                            modulation=homeostatic_result.modulation,
+                            eligibility_norm=homeostatic_result.eligibility_norm,
+                            applied_update_norm=(
+                                homeostatic_result.applied_update_norm
+                            ),
+                        )
+                    )
         except Exception as error:
             for brain in self._brains.values():
                 brain.discard_pending_transition()
             identity = routed.noralet_id
             raise RuntimeError(
-                f"predictive learning failed for Noralet {identity}"
+                f"lifetime learning failed for Noralet {identity}"
             ) from error
 
         return AutonomousTickResult(
             action_intents=tuple(actions),
             tick_result=tick_result,
             learning_results=tuple(learning_results),
+            homeostatic_learning_results=tuple(homeostatic_results),
         )
 
     @staticmethod

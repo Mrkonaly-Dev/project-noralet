@@ -11,6 +11,7 @@ from noralet import (
     NoraletBodyState,
     NoraletBrainConfig,
     NoraletExperience,
+    NoraletHomeostaticPlasticityConfig,
     NoraletLearningConfig,
     NoraletPhysiologyConfig,
     SensorimotorFeedback,
@@ -58,6 +59,25 @@ def learning_config(
         learning_rate=learning_rate,
         max_gradient_norm=max_gradient_norm,
         predictor_hidden_size=predictor_hidden_size,
+    )
+
+
+def homeostatic_config(
+    *,
+    energy_distress_weight: float = 1.0,
+    condition_distress_weight: float = 1.0,
+    homeostatic_modulation_scale: float = 0.2,
+    eligibility_decay: float = 0.8,
+    action_learning_rate: float = 0.05,
+    max_homeostatic_update_norm: float = 2.0,
+) -> NoraletHomeostaticPlasticityConfig:
+    return NoraletHomeostaticPlasticityConfig(
+        energy_distress_weight=energy_distress_weight,
+        condition_distress_weight=condition_distress_weight,
+        homeostatic_modulation_scale=homeostatic_modulation_scale,
+        eligibility_decay=eligibility_decay,
+        action_learning_rate=action_learning_rate,
+        max_homeostatic_update_norm=max_homeostatic_update_norm,
     )
 
 
@@ -135,6 +155,7 @@ def autonomous_setup(
     bodies: tuple[NoraletBodyState, ...] | None = None,
     brain: NoraletBrainConfig | None = None,
     learning: NoraletLearningConfig | None = None,
+    homeostatic: NoraletHomeostaticPlasticityConfig | None = None,
     actuator: NoraletActuatorConfig | None = None,
     simulation_seed: int = 1234,
     signal_energy_cost: float = 0.0,
@@ -166,5 +187,6 @@ def autonomous_setup(
         simulation.config.noralet_signals,
         actuator_values,
         learning,
+        homeostatic,
     )
     return AutonomousSimulationRunner(simulation, base), base

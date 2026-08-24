@@ -15,8 +15,13 @@ from torch.nn import functional as F
 from noralet.brain.config import NoraletBrainConfig
 from noralet.brain.encoder import ExperienceEncoder
 from noralet.brain.learning import (
+    ActionEligibilityTraces,
+    HomeostaticPlasticityResult,
+    NoraletHomeostaticPlasticityConfig,
     NoraletLearningConfig,
     PredictiveLearningResult,
+    homeostatic_drive,
+    homeostatic_modulation,
 )
 from noralet.brain.model import (
     ACTION_VECTOR_SIZE,
@@ -119,6 +124,11 @@ class _PendingTransition:
     action_vector: tuple[float, ...]
 
 
+@dataclass(slots=True)
+class _PendingHomeostaticTransition:
+    homeostatic_drive: float
+
+
 class NoraletBrain:
     """One independent model copy and its persistent recurrent hidden state."""
 
@@ -128,6 +138,9 @@ class NoraletBrain:
         model: NoraletBrainModel,
         config: NoraletBrainConfig,
         learning_config: NoraletLearningConfig | None,
+        homeostatic_plasticity_config: (
+            NoraletHomeostaticPlasticityConfig | None
+        ) = None,
         actuator_config: NoraletActuatorConfig,
         device: torch.device,
         action_random_source: object | None = None,
@@ -142,6 +155,22 @@ class NoraletBrain:
             NoraletLearningConfig,
         ):
             raise TypeError("learning_config must be a NoraletLearningConfig")
+        if homeostatic_plasticity_config is not None and not isinstance(
+            homeostatic_plasticity_config,
+            NoraletHomeostaticPlasticityConfig,
+        ):
+            raise TypeError(
+                "homeostatic_plasticity_config must be a "
+                "NoraletHomeostaticPlasticityConfig"
+            )
+        if (
+            homeostatic_plasticity_config is not None
+            and config.acceleration_exploration_std <= 0.0
+        ):
+            raise ValueError(
+                "homeostatic action plasticity requires positive "
+                "acceleration_exploration_std"
+            )
         if not isinstance(actuator_config, NoraletActuatorConfig):
             raise TypeError("actuator_config must be a NoraletActuatorConfig")
         if not isinstance(device, torch.device):
@@ -163,6 +192,7 @@ class NoraletBrain:
         self._model = model
         self._config = config
         self._learning_config = learning_config
+        self._homeostatic_plasticity_config = homeostatic_plasticity_config
         self._actuator_config = actuator_config
         self._device = device
         self._action_random_source = action_random_source
@@ -174,11 +204,23 @@ class NoraletBrain:
         )
         self._activation_count = 0
         self._learning_update_count = 0
+        self._homeostatic_update_count = 0
         self._pending_transition: _PendingTransition | None = None
+        self._pending_homeostatic_transition: (
+            _PendingHomeostaticTransition | None
+        ) = None
         self._optimizer: torch.optim.Adam | None = None
+        self._eligibility_traces: ActionEligibilityTraces | None = None
+        if homeostatic_plasticity_config is not None:
+            self._eligibility_traces = ActionEligibilityTraces.zeros_like(
+                acceleration=tuple(model.acceleration_head.parameters()),
+                consume=tuple(model.consume_head.parameters()),
+                signal=tuple(model.signal_head.parameters()),
+            )
         if learning_config is not None:
-            for parameter in model.action_head_parameters():
-                parameter.requires_grad_(False)
+            if homeostatic_plasticity_config is None:
+                for parameter in model.action_head_parameters():
+                    parameter.requires_grad_(False)
             plastic_parameters = model.predictive_plastic_parameters()
             self._optimizer = torch.optim.Adam(
                 plastic_parameters,
@@ -210,8 +252,16 @@ class NoraletBrain:
         return self._learning_config is not None
 
     @property
+    def homeostatic_learning_enabled(self) -> bool:
+        return self._homeostatic_plasticity_config is not None
+
+    @property
     def learning_update_count(self) -> int:
         return self._learning_update_count
+
+    @property
+    def homeostatic_update_count(self) -> int:
+        return self._homeostatic_update_count
 
     @property
     def target_experience_encoder(self) -> ExperienceEncoder | None:
@@ -227,7 +277,24 @@ class NoraletBrain:
 
     @property
     def has_pending_transition(self) -> bool:
-        return self._pending_transition is not None
+        return (
+            self._pending_transition is not None
+            or self._pending_homeostatic_transition is not None
+        )
+
+    @property
+    def pending_homeostatic_drive(self) -> float | None:
+        if self._pending_homeostatic_transition is None:
+            return None
+        return self._pending_homeostatic_transition.homeostatic_drive
+
+    @property
+    def eligibility_traces(self) -> ActionEligibilityTraces | None:
+        """Return detached observer copies of individual action eligibility."""
+
+        if self._eligibility_traces is None:
+            return None
+        return self._eligibility_traces.snapshot()
 
     @property
     def pending_action_vector(self) -> tuple[float, ...] | None:
@@ -316,6 +383,16 @@ class NoraletBrain:
     ) -> BrainActionSelection:
         """Select one intent and its predictor-facing motor representation."""
 
+        selection, _ = self._sample_brain_action_details(parameters, random_source)
+        return selection
+
+    def _sample_brain_action_details(
+        self,
+        parameters: BrainActionParameters,
+        random_source: _RandomSource,
+    ) -> tuple[BrainActionSelection, float]:
+        """Return one selection and its actual pre-tanh acceleration sample."""
+
         if not isinstance(parameters, BrainActionParameters):
             raise TypeError("parameters must be BrainActionParameters")
         if not callable(getattr(random_source, "random", None)):
@@ -346,7 +423,7 @@ class NoraletBrain:
             1.0 if index == signal_index else 0.0
             for index in range(len(_SIGNAL_EMISSIONS))
         )
-        return BrainActionSelection(
+        selection = BrainActionSelection(
             action_intent=ActionIntent(
                 acceleration=acceleration,
                 consume=consume,
@@ -358,6 +435,7 @@ class NoraletBrain:
                 *signal_one_hot,
             ),
         )
+        return selection, raw_motor_value
 
     def sample_action(
         self,
@@ -376,32 +454,264 @@ class NoraletBrain:
 
         if self._action_random_source is None:
             raise RuntimeError("this NoraletBrain has no action random stream")
-        if self._pending_transition is not None:
+        if self.has_pending_transition:
             raise RuntimeError("the previous lived transition is still unresolved")
-        if not self.learning_enabled:
+        if not self.learning_enabled and not self.homeostatic_learning_enabled:
             return self.sample_action(
                 self.activate(experience),
                 self._action_random_source,
             )
 
-        parameters, hidden = self._activate(experience, track_gradient=True)
-        selection = self.sample_brain_action(
+        parameters, hidden = self._activate(
+            experience,
+            track_gradient=self.learning_enabled,
+        )
+        selection, raw_acceleration_sample = self._sample_brain_action_details(
             parameters,
             self._action_random_source,
         )
-        predictor = self._model.prediction_model
-        assert predictor is not None
-        action_tensor = hidden.new_tensor(selection.action_vector)
-        prediction = predictor(hidden, action_tensor)
-        if not torch.isfinite(prediction).all().item():
-            raise FloatingPointError(
-                "next-experience prediction produced a non-finite value"
+        if self.homeostatic_learning_enabled:
+            self._record_action_eligibility(
+                hidden.detach(),
+                selection,
+                raw_acceleration_sample,
             )
-        self._pending_transition = _PendingTransition(
-            prediction=prediction,
-            action_vector=selection.action_vector,
-        )
+            assert self._homeostatic_plasticity_config is not None
+            self._pending_homeostatic_transition = _PendingHomeostaticTransition(
+                homeostatic_drive=homeostatic_drive(
+                    experience.interoception,
+                    self._homeostatic_plasticity_config,
+                )
+            )
+        if self.learning_enabled:
+            predictor = self._model.prediction_model
+            assert predictor is not None
+            action_tensor = hidden.new_tensor(selection.action_vector)
+            prediction = predictor(hidden, action_tensor)
+            if not torch.isfinite(prediction).all().item():
+                raise FloatingPointError(
+                    "next-experience prediction produced a non-finite value"
+                )
+            self._pending_transition = _PendingTransition(
+                prediction=prediction,
+                action_vector=selection.action_vector,
+            )
         return selection.action_intent
+
+    def _record_action_eligibility(
+        self,
+        hidden_state: Tensor,
+        selection: BrainActionSelection,
+        raw_acceleration_sample: float,
+    ) -> None:
+        """Decay traces and add selected-action log-likelihood gradients."""
+
+        assert self._homeostatic_plasticity_config is not None
+        assert self._eligibility_traces is not None
+        if hidden_state.requires_grad or hidden_state.grad_fn is not None:
+            raise ValueError("action eligibility requires detached recurrent state")
+        if not torch.isfinite(hidden_state).all().item():
+            raise FloatingPointError("eligibility context is non-finite")
+        acceleration_parameters = tuple(self._model.acceleration_head.parameters())
+        consume_parameters = tuple(self._model.consume_head.parameters())
+        signal_parameters = tuple(self._model.signal_head.parameters())
+        exploration_std = self._config.acceleration_exploration_std
+        assert exploration_std > 0.0
+
+        with torch.enable_grad():
+            acceleration_loc = self._model.acceleration_head(
+                hidden_state
+            ).squeeze(-1)
+            selected_raw = acceleration_loc.new_tensor(
+                float(raw_acceleration_sample)
+            ).detach()
+            normalized_deviation = (
+                selected_raw - acceleration_loc
+            ) / exploration_std
+            acceleration_log_probability = (
+                -0.5 * normalized_deviation.square()
+                - math.log(exploration_std)
+                - 0.5 * math.log(2.0 * math.pi)
+            )
+
+            consume_logit = self._model.consume_head(hidden_state).squeeze(-1)
+            selected_consume = consume_logit.new_tensor(
+                selection.consume_command
+            ).detach()
+            consume_log_probability = -F.binary_cross_entropy_with_logits(
+                consume_logit,
+                selected_consume,
+                reduction="sum",
+            )
+
+            signal_logits = self._model.signal_head(hidden_state)
+            signal_log_probability = F.log_softmax(signal_logits, dim=0)[
+                selection.signal_motor_index
+            ]
+
+            log_probabilities = (
+                acceleration_log_probability,
+                consume_log_probability,
+                signal_log_probability,
+            )
+            if not all(
+                torch.isfinite(value).item() for value in log_probabilities
+            ):
+                raise FloatingPointError(
+                    "selected-action log probability is non-finite"
+                )
+            increments = tuple(
+                tuple(
+                    gradient.detach()
+                    for gradient in torch.autograd.grad(
+                        log_probability,
+                        parameters,
+                        retain_graph=False,
+                        create_graph=False,
+                    )
+                )
+                for log_probability, parameters in zip(
+                    log_probabilities,
+                    (
+                        acceleration_parameters,
+                        consume_parameters,
+                        signal_parameters,
+                    ),
+                    strict=True,
+                )
+            )
+        if not all(
+            torch.isfinite(increment).all().item()
+            for group in increments
+            for increment in group
+        ):
+            raise FloatingPointError("action eligibility increment is non-finite")
+        self._eligibility_traces = self._eligibility_traces.advanced(
+            acceleration_increment=increments[0],
+            consume_increment=increments[1],
+            signal_increment=increments[2],
+            decay=self._homeostatic_plasticity_config.eligibility_decay,
+        )
+
+    def apply_homeostatic_update(
+        self,
+        next_experience: NoraletExperience,
+    ) -> HomeostaticPlasticityResult:
+        """Apply one direct eligibility-modulated action-head update."""
+
+        if not isinstance(next_experience, NoraletExperience):
+            raise TypeError("next_experience must be a NoraletExperience")
+        if not self.homeostatic_learning_enabled:
+            raise RuntimeError("homeostatic action plasticity is disabled")
+        if self._pending_homeostatic_transition is None:
+            raise RuntimeError(
+                "there is no pending homeostatic transition to update"
+            )
+        assert self._homeostatic_plasticity_config is not None
+        assert self._eligibility_traces is not None
+        pending = self._pending_homeostatic_transition
+        config = self._homeostatic_plasticity_config
+        parameters = self._model.action_head_parameters()
+
+        try:
+            if not all(
+                torch.isfinite(parameter).all().item()
+                for parameter in parameters
+            ):
+                raise FloatingPointError(
+                    "action-head parameter is non-finite before modulation"
+                )
+            if not all(
+                torch.isfinite(trace).all().item()
+                for trace in self._eligibility_traces.tensors
+            ):
+                raise FloatingPointError("eligibility trace is non-finite")
+
+            drive_after = homeostatic_drive(
+                next_experience.interoception,
+                config,
+            )
+            modulation = homeostatic_modulation(
+                pending.homeostatic_drive,
+                drive_after,
+                config,
+            )
+            if not math.isfinite(modulation):
+                raise FloatingPointError("homeostatic modulation is non-finite")
+            eligibility_norm = self._eligibility_traces.combined_norm()
+            directions = tuple(
+                trace * modulation for trace in self._eligibility_traces.tensors
+            )
+            direction_vector = torch.cat(
+                tuple(direction.reshape(-1) for direction in directions)
+            )
+            direction_norm = float(
+                torch.linalg.vector_norm(direction_vector).item()
+            )
+            if not math.isfinite(direction_norm):
+                raise FloatingPointError(
+                    "homeostatic update direction norm is non-finite"
+                )
+            clipping_factor = (
+                1.0
+                if direction_norm == 0.0
+                else min(
+                    1.0,
+                    config.max_homeostatic_update_norm / direction_norm,
+                )
+            )
+            updates = tuple(
+                direction
+                * clipping_factor
+                * config.action_learning_rate
+                for direction in directions
+            )
+            if not all(torch.isfinite(update).all().item() for update in updates):
+                raise FloatingPointError("homeostatic parameter update is non-finite")
+            applied_update_norm = float(
+                torch.linalg.vector_norm(
+                    torch.cat(tuple(update.reshape(-1) for update in updates))
+                ).item()
+            )
+            if not math.isfinite(applied_update_norm):
+                raise FloatingPointError(
+                    "applied homeostatic update norm is non-finite"
+                )
+            proposed_parameters = tuple(
+                parameter.detach() + update
+                for parameter, update in zip(parameters, updates, strict=True)
+            )
+            if not all(
+                torch.isfinite(proposed).all().item()
+                for proposed in proposed_parameters
+            ):
+                raise FloatingPointError(
+                    "homeostatic update would corrupt action-head parameters"
+                )
+            with torch.no_grad():
+                for parameter, proposed in zip(
+                    parameters,
+                    proposed_parameters,
+                    strict=True,
+                ):
+                    parameter.copy_(proposed)
+            if not all(
+                torch.isfinite(parameter).all().item()
+                for parameter in parameters
+            ):
+                raise FloatingPointError(
+                    "action-head parameter is non-finite after modulation"
+                )
+            self._homeostatic_update_count += 1
+            return HomeostaticPlasticityResult(
+                homeostatic_drive_before=pending.homeostatic_drive,
+                homeostatic_drive_after=drive_after,
+                modulation=modulation,
+                eligibility_norm=eligibility_norm,
+                applied_update_norm=applied_update_norm,
+            )
+        finally:
+            self._pending_homeostatic_transition = None
 
     def learn(self, next_experience: NoraletExperience) -> PredictiveLearningResult:
         """Apply one Adam update from one actually lived next Experience."""
@@ -468,11 +778,18 @@ class NoraletBrain:
             self._pending_transition = None
 
     def discard_pending_transition(self) -> None:
-        """Release an unlived terminal prediction without fabricating a target."""
+        """Release unlived predictive/modulatory context without a target."""
 
         if self._optimizer is not None:
             self._optimizer.zero_grad(set_to_none=True)
         self._pending_transition = None
+        self._pending_homeostatic_transition = None
+
+    def discard_lifetime_state(self) -> None:
+        """Destroy pending and eligibility state when this individual dies."""
+
+        self.discard_pending_transition()
+        self._eligibility_traces = None
 
     @staticmethod
     def signal_motor_outcomes() -> tuple[SignalMotorChoice, ...]:
