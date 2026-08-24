@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 import math
+from types import MappingProxyType
 
 from noralet.noralets.actions import ActionIntent
 from noralet.noralets.body import NoraletBodyState
 from noralet.noralets.energy import NoraletEnergyConfig
+from noralet.noralets.experience import NoraletExperience
 from noralet.noralets.physiology import (
     condition_after_tick,
     natural_death_probability,
@@ -28,6 +30,11 @@ from noralet.simulation.events import (
     NoraletMoved,
     SimulationEvent,
     TickAdvanced,
+)
+from noralet.simulation.experience import (
+    _ExperienceBuilder,
+    _NEUTRAL_TRANSITION_FEEDBACK,
+    _TransitionFeedback,
 )
 from noralet.simulation.randomness import DeterministicRandomStreams
 from noralet.simulation.state import WorldState
@@ -54,9 +61,11 @@ class Simulation:
 
     __slots__ = (
         "_config",
+        "_experience_builder",
         "_initial_total_energy",
         "_random_streams",
         "_state",
+        "_transition_feedback",
     )
 
     ENERGY_CONSERVATION_ABS_TOLERANCE = 1e-9
@@ -100,6 +109,26 @@ class Simulation:
         self._validate_initial_positions(self._state.bodies)
         self._validate_initial_noralet_energy(self._state.bodies)
         self._validate_initial_energy_points(self._state.energy_points)
+        self._validate_initial_perceptual_signatures(self._state.bodies)
+        experience_config = self.config.noralet_experience
+        if experience_config is None:
+            self._experience_builder = None
+            self._transition_feedback = MappingProxyType({})
+        else:
+            energy_config = self.config.noralet_energy
+            assert energy_config is not None
+            self._experience_builder = _ExperienceBuilder(
+                config=experience_config,
+                energy_capacity=energy_config.energy_capacity,
+                left_boundary=self.config.left_boundary,
+                right_boundary=self.config.right_boundary,
+            )
+            self._transition_feedback = MappingProxyType(
+                {
+                    body.noralet_id: _NEUTRAL_TRANSITION_FEEDBACK
+                    for body in self._state.bodies
+                }
+            )
         self._random_streams = DeterministicRandomStreams(config.master_seed)
         self._initial_total_energy = self._state.energy_totals.total_energy
         if not math.isfinite(self._initial_total_energy):
@@ -130,6 +159,34 @@ class Simulation:
 
         return self._initial_total_energy
 
+    def experience_for(self, noralet_id: int) -> NoraletExperience:
+        """Return the current immutable experience of one living Noralet."""
+
+        if type(noralet_id) is not int:
+            raise TypeError("noralet_id must be an integer")
+        if self._experience_builder is None:
+            raise RuntimeError("Noralet experience is not enabled")
+        body = self._state.body(noralet_id)
+        return self._experience_builder.build(
+            self._state,
+            body,
+            self._transition_feedback[noralet_id],
+        )
+
+    def experiences_for_all(self) -> tuple[NoraletExperience, ...]:
+        """Return all current experiences in stable living-identity order."""
+
+        if self._experience_builder is None:
+            raise RuntimeError("Noralet experience is not enabled")
+        return tuple(
+            self._experience_builder.build(
+                self._state,
+                body,
+                self._transition_feedback[body.noralet_id],
+            )
+            for body in self._state.bodies
+        )
+
     def step(
         self,
         action_intents: Mapping[int, ActionIntent] | None = None,
@@ -139,7 +196,7 @@ class Simulation:
         state_before = self._state
         intents = self._validate_action_intents(state_before, action_intents)
 
-        state_after, transition_events = self._resolve_next_state(
+        state_after, transition_events, transition_feedback = self._resolve_next_state(
             state_before,
             intents,
         )
@@ -155,6 +212,7 @@ class Simulation:
         )
 
         self._state = state_after
+        self._transition_feedback = MappingProxyType(dict(transition_feedback))
         return result
 
     def audit_energy_conservation(self, state: WorldState | None = None) -> None:
@@ -249,6 +307,20 @@ class Simulation:
                     "initial energy points violate minimum_energy_point_spacing"
                 )
 
+    def _validate_initial_perceptual_signatures(
+        self,
+        bodies: tuple[NoraletBodyState, ...],
+    ) -> None:
+        experience = self.config.noralet_experience
+        if experience is None:
+            return
+        for body in bodies:
+            if len(body.perceptual_signature) != experience.signature_length:
+                raise ValueError(
+                    f"perceptual signature for Noralet {body.noralet_id} must "
+                    f"have length {experience.signature_length}"
+                )
+
     @staticmethod
     def _validate_action_intents(
         state_before: WorldState,
@@ -277,7 +349,11 @@ class Simulation:
         self,
         state_before: WorldState,
         action_intents: Mapping[int, ActionIntent],
-    ) -> tuple[WorldState, tuple[SimulationEvent, ...]]:
+    ) -> tuple[
+        WorldState,
+        tuple[SimulationEvent, ...],
+        Mapping[int, _TransitionFeedback],
+    ]:
         if self.config.noralet_energy is None:
             return self._resolve_legacy_next_state(state_before, action_intents)
         return self._resolve_energy_enabled_next_state(state_before, action_intents)
@@ -286,7 +362,11 @@ class Simulation:
         self,
         state_before: WorldState,
         action_intents: Mapping[int, ActionIntent],
-    ) -> tuple[WorldState, tuple[SimulationEvent, ...]]:
+    ) -> tuple[
+        WorldState,
+        tuple[SimulationEvent, ...],
+        Mapping[int, _TransitionFeedback],
+    ]:
         """Preserve Iteration 1-3 motion when Noralet Energy is disabled."""
 
         tick_after = state_before.tick + 1
@@ -349,6 +429,7 @@ class Simulation:
                 energy=body.energy,
                 age_ticks=body.age_ticks,
                 condition=body.condition,
+                perceptual_signature=body.perceptual_signature,
             )
             for body in state_before.bodies
             if self._is_inside_world(positions_after[body.noralet_id])
@@ -380,13 +461,17 @@ class Simulation:
             *death_events,
             *ecology_events,
         )
-        return state_after, events
+        return state_after, events, {}
 
     def _resolve_energy_enabled_next_state(
         self,
         state_before: WorldState,
         action_intents: Mapping[int, ActionIntent],
-    ) -> tuple[WorldState, tuple[SimulationEvent, ...]]:
+    ) -> tuple[
+        WorldState,
+        tuple[SimulationEvent, ...],
+        Mapping[int, _TransitionFeedback],
+    ]:
         """Resolve energy, physics, physiology and ecology in canonical phases."""
 
         energy_config = self.config.noralet_energy
@@ -399,6 +484,7 @@ class Simulation:
             noralet_energy,
             post_consumption_points,
             consumption_events,
+            consumed_energy,
         ) = self._resolve_consumption(
             state_before,
             action_intents,
@@ -409,6 +495,9 @@ class Simulation:
         environmental_transfers: dict[str, list[float]] = {
             region.region_id: [] for region in ecology.regions
         }
+        actual_energy_expenditure = {
+            body.noralet_id: 0.0 for body in state_before.bodies
+        }
         existence_events: list[NoraletEnergySpent] = []
         for body in state_before.bodies:
             region = ecology.region_for(body.position)
@@ -418,6 +507,7 @@ class Simulation:
             )
             if energy_spent > 0.0:
                 noralet_energy[body.noralet_id] -= energy_spent
+                actual_energy_expenditure[body.noralet_id] += energy_spent
                 environmental_transfers[region.region_id].append(energy_spent)
                 existence_events.append(
                     NoraletEnergySpent(
@@ -458,6 +548,7 @@ class Simulation:
             applied_accelerations[body.noralet_id] = applied
             if energy_spent > 0.0:
                 noralet_energy[body.noralet_id] -= energy_spent
+                actual_energy_expenditure[body.noralet_id] += energy_spent
                 region = ecology.region_for(body.position)
                 environmental_transfers[region.region_id].append(energy_spent)
                 acceleration_events_spent.append(
@@ -622,6 +713,7 @@ class Simulation:
                 energy=noralet_energy[body.noralet_id],
                 age_ticks=candidate_ages[body.noralet_id],
                 condition=candidate_conditions[body.noralet_id],
+                perceptual_signature=body.perceptual_signature,
             )
             for body in state_before.bodies
             if body.noralet_id not in death_causes
@@ -676,7 +768,23 @@ class Simulation:
             *natural_release_events,
             *ecology_events,
         )
-        return state_after, events
+        transition_feedback: dict[int, _TransitionFeedback] = {}
+        if self._experience_builder is not None:
+            transition_feedback = {
+                body.noralet_id: _TransitionFeedback(
+                    applied_acceleration=applied_accelerations[body.noralet_id],
+                    consume_attempt_executed=(
+                        body.noralet_id in action_intents
+                        and action_intents[body.noralet_id].consume
+                    ),
+                    consumed_energy=consumed_energy[body.noralet_id],
+                    actual_energy_expenditure=actual_energy_expenditure[
+                        body.noralet_id
+                    ],
+                )
+                for body in surviving_bodies
+            }
+        return state_after, events, transition_feedback
 
     def _resolve_consumption(
         self,
@@ -688,6 +796,7 @@ class Simulation:
         dict[int, float],
         tuple[ConsumableEnergyPoint, ...],
         tuple[EnergyConsumed, ...],
+        dict[int, float],
     ]:
         """Resolve all tick-start consume targets with fair water filling."""
 
@@ -709,6 +818,9 @@ class Simulation:
         noralet_energy = {
             body.noralet_id: body.energy for body in state_before.bodies
         }
+        consumed_energy = {
+            body.noralet_id: 0.0 for body in state_before.bodies
+        }
         surviving_points: list[ConsumableEnergyPoint] = []
         events: list[EnergyConsumed] = []
         for point in state_before.energy_points:
@@ -729,6 +841,7 @@ class Simulation:
                 if allocation <= 0.0:
                     continue
                 noralet_energy[noralet_id] += allocation
+                consumed_energy[noralet_id] += allocation
                 actual_allocations[noralet_id] = allocation
                 events.append(
                     EnergyConsumed(
@@ -753,7 +866,12 @@ class Simulation:
                     )
                 )
 
-        return noralet_energy, tuple(surviving_points), tuple(events)
+        return (
+            noralet_energy,
+            tuple(surviving_points),
+            tuple(events),
+            consumed_energy,
+        )
 
     @staticmethod
     def _select_consumption_target(

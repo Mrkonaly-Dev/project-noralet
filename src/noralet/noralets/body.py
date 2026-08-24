@@ -1,5 +1,6 @@
 """Immutable physical state of a living Noralet."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 import math
 
@@ -14,6 +15,7 @@ class NoraletBodyState:
     energy: float = 0.0
     age_ticks: int = 0
     condition: float = 1.0
+    perceptual_signature: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.noralet_id) is not int:
@@ -31,10 +33,12 @@ class NoraletBodyState:
         condition = self._finite_float("condition", self.condition)
         if not 0.0 <= condition <= 1.0:
             raise ValueError("condition must be in [0, 1]")
+        signature = self._finite_signature(self.perceptual_signature)
         object.__setattr__(self, "position", position)
         object.__setattr__(self, "velocity", velocity)
         object.__setattr__(self, "energy", energy)
         object.__setattr__(self, "condition", condition)
+        object.__setattr__(self, "perceptual_signature", signature)
 
     @staticmethod
     def _finite_float(name: str, value: float) -> float:
@@ -44,3 +48,21 @@ class NoraletBodyState:
         if not math.isfinite(converted):
             raise ValueError(f"{name} must be finite")
         return converted
+
+    @classmethod
+    def _finite_signature(
+        cls,
+        values: Iterable[float],
+    ) -> tuple[float, ...]:
+        if isinstance(values, (str, bytes, dict, set, frozenset)):
+            raise TypeError("perceptual_signature must be an ordered numeric iterable")
+        try:
+            signature = tuple(values)
+        except TypeError as error:
+            raise TypeError(
+                "perceptual_signature must be an ordered numeric iterable"
+            ) from error
+        return tuple(
+            cls._finite_float("perceptual_signature value", value)
+            for value in signature
+        )

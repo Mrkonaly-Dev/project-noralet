@@ -9,6 +9,7 @@ from noralet.simulation import (
     FormationProbabilities,
     NoraletBodyState,
     NoraletEnergyConfig,
+    NoraletExperienceConfig,
     NoraletPhysiologyConfig,
     RegionDefinition,
     RegionKind,
@@ -42,6 +43,7 @@ def noralet_energy_simulation(
     probabilities: FormationProbabilities = DEFAULT_PROBABILITIES,
     seed: int = 20260821,
     physiology: NoraletPhysiologyConfig | None = None,
+    experience: NoraletExperienceConfig | None = None,
 ) -> Simulation:
     """Construct one fully explicit energy-enabled simulation."""
 
@@ -70,6 +72,7 @@ def noralet_energy_simulation(
             energy_ecology=ecology,
             noralet_energy=energy,
             noralet_physiology=physiology,
+            noralet_experience=experience,
         ),
         initial_bodies=bodies,
         initial_energy_points=points,
