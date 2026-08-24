@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from noralet.brain.base import BaseBrain
 from noralet.brain.runtime import NoraletBrain
@@ -12,11 +13,35 @@ from noralet.simulation.tick import TickResult
 
 
 @dataclass(frozen=True, slots=True)
+class NoraletLearningResult:
+    """Observer-only metrics for one successful lived-transition update."""
+
+    noralet_id: int
+    prediction_loss: float
+    gradient_norm: float
+
+    def __post_init__(self) -> None:
+        if type(self.noralet_id) is not int:
+            raise TypeError("noralet_id must be an integer")
+        for name in ("prediction_loss", "gradient_norm"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a real number")
+            converted = float(value)
+            if not math.isfinite(converted):
+                raise ValueError(f"{name} must be finite")
+            if converted < 0.0:
+                raise ValueError(f"{name} cannot be negative")
+            object.__setattr__(self, name, converted)
+
+
+@dataclass(frozen=True, slots=True)
 class AutonomousTickResult:
     """Observer-facing neural intentions and the resolved physical transition."""
 
     action_intents: tuple[tuple[int, ActionIntent], ...]
     tick_result: TickResult
+    learning_results: tuple[NoraletLearningResult, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.action_intents, tuple):
@@ -37,6 +62,21 @@ class AutonomousTickResult:
             raise ValueError("routed actions must have unique canonical identities")
         if not isinstance(self.tick_result, TickResult):
             raise TypeError("tick_result must be a TickResult")
+        if not isinstance(self.learning_results, tuple):
+            raise TypeError("learning_results must be an immutable tuple")
+        learning_ids: list[int] = []
+        for result in self.learning_results:
+            if not isinstance(result, NoraletLearningResult):
+                raise TypeError(
+                    "every learning result must be a NoraletLearningResult"
+                )
+            learning_ids.append(result.noralet_id)
+        if learning_ids != sorted(learning_ids) or len(learning_ids) != len(
+            set(learning_ids)
+        ):
+            raise ValueError(
+                "learning results must have unique canonical identities"
+            )
 
     def action_for(self, noralet_id: int) -> ActionIntent:
         if type(noralet_id) is not int:
@@ -44,6 +84,14 @@ class AutonomousTickResult:
         for routed_id, action in self.action_intents:
             if routed_id == noralet_id:
                 return action
+        raise KeyError(noralet_id)
+
+    def learning_for(self, noralet_id: int) -> NoraletLearningResult:
+        if type(noralet_id) is not int:
+            raise TypeError("noralet_id must be an integer")
+        for result in self.learning_results:
+            if result.noralet_id == noralet_id:
+                return result
         raise KeyError(noralet_id)
 
 
@@ -106,6 +154,7 @@ class AutonomousSimulationRunner:
         routed_experiences = self._simulation.routed_experiences_for_all()
         living_ids = {routed.noralet_id for routed in routed_experiences}
         for dead_id in tuple(set(self._brains) - living_ids):
+            self._brains[dead_id].discard_pending_transition()
             del self._brains[dead_id]
         missing_ids = living_ids - set(self._brains)
         if missing_ids:
@@ -115,21 +164,56 @@ class AutonomousSimulationRunner:
             )
 
         actions: list[tuple[int, ActionIntent]] = []
-        for routed in routed_experiences:
-            action = self._brains[routed.noralet_id].act(routed.experience)
-            actions.append((routed.noralet_id, action))
+        try:
+            for routed in routed_experiences:
+                action = self._brains[routed.noralet_id].act(
+                    routed.experience
+                )
+                actions.append((routed.noralet_id, action))
+        except Exception:
+            for brain in self._brains.values():
+                brain.discard_pending_transition()
+            raise
 
-        tick_result = self._simulation.step(dict(actions))
-        surviving_ids = {
-            routed.noralet_id
-            for routed in self._simulation.routed_experiences_for_all()
-        }
+        try:
+            tick_result = self._simulation.step(dict(actions))
+        except Exception:
+            for brain in self._brains.values():
+                brain.discard_pending_transition()
+            raise
+
+        next_experiences = self._simulation.routed_experiences_for_all()
+        surviving_ids = {routed.noralet_id for routed in next_experiences}
         for dead_id in tuple(set(self._brains) - surviving_ids):
+            self._brains[dead_id].discard_pending_transition()
             del self._brains[dead_id]
+
+        learning_results: list[NoraletLearningResult] = []
+        try:
+            for routed in next_experiences:
+                brain = self._brains[routed.noralet_id]
+                if not brain.learning_enabled:
+                    continue
+                result = brain.learn(routed.experience)
+                learning_results.append(
+                    NoraletLearningResult(
+                        noralet_id=routed.noralet_id,
+                        prediction_loss=result.prediction_loss,
+                        gradient_norm=result.gradient_norm,
+                    )
+                )
+        except Exception as error:
+            for brain in self._brains.values():
+                brain.discard_pending_transition()
+            identity = routed.noralet_id
+            raise RuntimeError(
+                f"predictive learning failed for Noralet {identity}"
+            ) from error
 
         return AutonomousTickResult(
             action_intents=tuple(actions),
             tick_result=tick_result,
+            learning_results=tuple(learning_results),
         )
 
     @staticmethod

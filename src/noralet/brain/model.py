@@ -5,14 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+import torch
 from torch import Tensor, nn
 
 from noralet.brain.config import NoraletBrainConfig
 from noralet.brain.encoder import ExperienceEncoder
+from noralet.brain.learning import NoraletLearningConfig
 from noralet.noralets.experience import NoraletExperience
 
 
 SIGNAL_MOTOR_OUTCOME_COUNT = 9
+ACTION_VECTOR_SIZE = 11
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,8 +63,41 @@ class BrainActionParameters:
         return tuple(weight / total for weight in weights)
 
 
+class PredictionModel(nn.Module):
+    """Compact action-conditioned predictor of the next sensory embedding."""
+
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        predictor_hidden_size: int,
+        experience_embedding_size: int,
+    ) -> None:
+        super().__init__()
+        self.input_layer = nn.Linear(
+            hidden_size + ACTION_VECTOR_SIZE,
+            predictor_hidden_size,
+        )
+        self.output_layer = nn.Linear(
+            predictor_hidden_size,
+            experience_embedding_size,
+        )
+
+    def forward(self, hidden_state: Tensor, action_vector: Tensor) -> Tensor:
+        if hidden_state.ndim != 1:
+            raise ValueError("hidden_state must be a one-dimensional tensor")
+        if action_vector.ndim != 1 or action_vector.shape[0] != ACTION_VECTOR_SIZE:
+            raise ValueError("action_vector must contain exactly eleven values")
+        if hidden_state.device != action_vector.device:
+            raise ValueError("hidden_state and action_vector must share a device")
+        combined = torch.tanh(
+            self.input_layer(torch.cat((hidden_state, action_vector)))
+        )
+        return self.output_layer(combined)
+
+
 class NoraletBrainModel(nn.Module):
-    """Experience encoder, one GRUCell and three low-level action heads."""
+    """Recurrent action model with an optional inherited forward predictor."""
 
     def __init__(
         self,
@@ -69,8 +105,14 @@ class NoraletBrainModel(nn.Module):
         *,
         external_pattern_length: int,
         signal_pattern_length: int,
+        learning_config: NoraletLearningConfig | None = None,
     ) -> None:
         super().__init__()
+        if learning_config is not None and not isinstance(
+            learning_config,
+            NoraletLearningConfig,
+        ):
+            raise TypeError("learning_config must be a NoraletLearningConfig")
         self.encoder = ExperienceEncoder(
             config,
             external_pattern_length=external_pattern_length,
@@ -85,6 +127,59 @@ class NoraletBrainModel(nn.Module):
         self.signal_head = nn.Linear(
             config.hidden_size,
             SIGNAL_MOTOR_OUTCOME_COUNT,
+        )
+        self.prediction_model = (
+            None
+            if learning_config is None
+            else PredictionModel(
+                hidden_size=config.hidden_size,
+                predictor_hidden_size=learning_config.predictor_hidden_size,
+                experience_embedding_size=config.experience_embedding_size,
+            )
+        )
+
+    def iteration_8_parameters(self) -> tuple[nn.Parameter, ...]:
+        """Return pre-predictor parameters in their original initialization order."""
+
+        modules = (
+            self.encoder,
+            self.recurrent_core,
+            self.acceleration_head,
+            self.consume_head,
+            self.signal_head,
+        )
+        return tuple(
+            parameter
+            for module in modules
+            for parameter in module.parameters()
+        )
+
+    def predictive_plastic_parameters(self) -> tuple[nn.Parameter, ...]:
+        """Return exactly encoder, recurrent-core and predictor parameters."""
+
+        if self.prediction_model is None:
+            return ()
+        return tuple(
+            parameter
+            for module in (
+                self.encoder,
+                self.recurrent_core,
+                self.prediction_model,
+            )
+            for parameter in module.parameters()
+        )
+
+    def action_head_parameters(self) -> tuple[nn.Parameter, ...]:
+        """Return the inherited motor-head parameters excluded from learning."""
+
+        return tuple(
+            parameter
+            for module in (
+                self.acceleration_head,
+                self.consume_head,
+                self.signal_head,
+            )
+            for parameter in module.parameters()
         )
 
     def forward(

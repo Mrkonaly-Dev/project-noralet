@@ -11,6 +11,8 @@ from noralet import (
     NoraletBodyState,
     NoraletBrainConfig,
     NoraletExperience,
+    NoraletLearningConfig,
+    NoraletPhysiologyConfig,
     SensorimotorFeedback,
     SignalPercept,
 )
@@ -44,6 +46,19 @@ def brain_config(
 
 def actuator_config(max_acceleration: float = 0.25) -> NoraletActuatorConfig:
     return NoraletActuatorConfig(max_acceleration=max_acceleration)
+
+
+def learning_config(
+    *,
+    learning_rate: float = 0.01,
+    max_gradient_norm: float = 1.0,
+    predictor_hidden_size: int = 8,
+) -> NoraletLearningConfig:
+    return NoraletLearningConfig(
+        learning_rate=learning_rate,
+        max_gradient_norm=max_gradient_norm,
+        predictor_hidden_size=predictor_hidden_size,
+    )
 
 
 def brain_body(
@@ -119,11 +134,13 @@ def autonomous_setup(
     *,
     bodies: tuple[NoraletBodyState, ...] | None = None,
     brain: NoraletBrainConfig | None = None,
+    learning: NoraletLearningConfig | None = None,
     actuator: NoraletActuatorConfig | None = None,
     simulation_seed: int = 1234,
     signal_energy_cost: float = 0.0,
     existence_cost: float = 0.0,
     acceleration_cost: float = 0.0,
+    physiology: NoraletPhysiologyConfig | None = None,
 ) -> tuple[AutonomousSimulationRunner, BaseBrain]:
     body_values = (
         (brain_body(1, -2.0), brain_body(2, 2.0))
@@ -138,6 +155,7 @@ def autonomous_setup(
         actuator=actuator_values,
         existence_cost=existence_cost,
         acceleration_cost=acceleration_cost,
+        physiology=physiology,
         seed=simulation_seed,
     )
     assert simulation.config.noralet_experience is not None
@@ -147,5 +165,6 @@ def autonomous_setup(
         simulation.config.noralet_experience,
         simulation.config.noralet_signals,
         actuator_values,
+        learning,
     )
     return AutonomousSimulationRunner(simulation, base), base
