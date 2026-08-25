@@ -1,4 +1,4 @@
-"""Dependency-free headless command-line interface."""
+"""Headless-first command-line interface with a lazily loaded desktop UI."""
 
 from __future__ import annotations
 
@@ -62,6 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="explicit master random seed",
     )
+
+    subparsers.add_parser("ui", help="open the Renderer / Observer desktop UI")
 
     research_parser = subparsers.add_parser(
         "research",
@@ -139,6 +141,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"final tick: {simulation.state.tick}; seed: {args.seed}"
         )
         return 0
+
+    if args.command == "ui":
+        from noralet.ui.app import run_ui
+
+        return run_ui(["noralet"])
 
     if args.command == "research":
         from noralet.research import (

@@ -368,13 +368,46 @@ def build_run_components(
         raise TypeError("condition must be a LearningCondition")
     if not isinstance(seeds, SeedMapping):
         raise TypeError("seeds must be a SeedMapping")
+    return build_baseline_components(
+        initial_population=config.initial_population,
+        device=config.device,
+        condition=condition,
+        simulation_seed=seeds.simulation_seed,
+        base_brain_seed=seeds.base_brain_seed,
+    )
+
+
+def build_baseline_components(
+    *,
+    initial_population: int,
+    device: str,
+    condition: LearningCondition,
+    simulation_seed: int,
+    base_brain_seed: int,
+) -> tuple[Simulation, BaseBrain]:
+    """Build one baseline world/brain pair for research or observer tooling."""
+
+    if type(initial_population) is not int or initial_population <= 0:
+        raise ValueError("initial_population must be a positive integer")
+    if not isinstance(device, str):
+        raise TypeError("device must be a string")
+    normalized_device = device.strip().lower()
+    if normalized_device not in ("cpu", "cuda", "auto"):
+        raise ValueError("device must be cpu, cuda, or auto")
+    if not isinstance(condition, LearningCondition):
+        raise TypeError("condition must be a LearningCondition")
+    if type(simulation_seed) is not int:
+        raise TypeError("simulation_seed must be an integer")
+    if type(base_brain_seed) is not int:
+        raise TypeError("base_brain_seed must be an integer")
+
     energy = _energy_config()
     experience = _experience_config()
     signals = _signal_config()
     actuator = _actuator_config()
     simulation = Simulation(
         SimulationConfig(
-            master_seed=seeds.simulation_seed,
+            master_seed=simulation_seed,
             left_boundary=-100.0,
             right_boundary=100.0,
             energy_ecology=_ecology_config(),
@@ -384,11 +417,11 @@ def build_run_components(
             noralet_signals=signals,
             noralet_actuators=actuator,
         ),
-        initial_bodies=initial_bodies(config.initial_population),
+        initial_bodies=initial_bodies(initial_population),
         initial_energy_points=initial_energy_points(),
     )
     base_brain = BaseBrain(
-        _brain_config(seeds.base_brain_seed, config.device),
+        _brain_config(base_brain_seed, normalized_device),
         experience,
         signals,
         actuator,
