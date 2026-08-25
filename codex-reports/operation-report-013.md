@@ -391,3 +391,84 @@ validation, mutation, learning, world, checkpoint, resume, result-schema, Stop,
 or Watch Champion semantics. Validation used base commit
 `9b95ebf7afca05b7dceee16cf1341505f0479e41`. No commit or push was performed by
 this patch.
+
+## Post-implementation UI patch — Champion Watch labeling and Evolution Resume (2026-08-25)
+
+Champion Watch now switches the existing Live Simulation renderer into an
+explicit observer-only presentation. The lower group is titled `CHAMPION WATCH`
+instead of `Baseline world · run setup`, and displays the saved candidate ID,
+source evolution run/result directory, source generation, fresh-life status,
+birth Energy, source evolution device, actual watch device, and current
+simulation seed/population. The ordinary baseline setup fields are hidden and
+disabled while the champion session is attached. The former Reset action is
+labelled `Return to baseline setup`; returning clears the watched session and
+restores the normal baseline controls. Champion construction, inherited genome,
+fresh learned state, ticking, and learning behavior were not changed.
+
+The Evolution tab now provides `Resume evolution…`, backed by a normal Qt file
+picker for `evolution-state.pt`. Loading a checkpoint displays its original
+result directory/run ID, completed generation count, population size, elite
+count, parent pool, mutation sigma, training/validation world counts,
+Noralets/world, maximum ticks, initial Energy, initial evolution seed, saved
+device, and current best champion metadata. These checkpoint-derived fields are
+read-only and the fresh-run setup panel is disabled for the duration of resume
+mode.
+
+`Continue to generation (total)` uses the total target count: a checkpoint with
+one completed generation and target two runs generation one and finishes with
+two total completed generations. A target less than or equal to the checkpoint's
+completed count is rejected before process launch. The optional device selector
+defaults to no override. The resume `QProcess` invokes the existing harness with
+only:
+
+```text
+python -u -m noralet evolution basebrain-bootstrap \
+  --generations <new-total-target> \
+  --resume <exact-existing-checkpoint-path> \
+  [--device <optional-override>]
+```
+
+No population, elite, parent, mutation, world, Noralet, tick, Energy, seed,
+output-root, fitness, or other scientific option is passed by the resume UI.
+The engine therefore remains the sole authority for checkpoint restoration and
+continues writing into the checkpoint's original result directory. After fresh
+or resumed completion, `Continue this evolution` remains available whenever the
+result's `evolution-state.pt` exists.
+
+Focused Evolution UI tests covered exact checkpoint metadata, completed-count
+loading, locked scientific configuration, invalid target rejection, exact
+checkpoint path and total target in the command, absence of scientific resume
+flags despite programmatic fresh-control edits, optional device override, real
+resumed `QProcess` continuation in the original directory, fresh Start,
+post-run convenience, champion labeling/provenance, and unchanged tick-zero to
+tick-one Watch Champion behavior:
+
+```text
+uv run python -m unittest tests.test_evolution_ui -v
+Ran 11 tests in 10.519s
+OK
+```
+
+The final complete project regression passed:
+
+```text
+uv run python -m unittest discover -s tests
+Ran 450 tests in 31.878s
+OK
+```
+
+`uv run python -m compileall -q src tests`, `uv lock --check`, and
+`git diff --check` passed. The exact `uv run noralet ui` entry point stayed active
+until intentionally interrupted after launch verification. No long evolution
+study was run; every new evolution validation used two candidates and a two-tick
+cap. The visually inspected renders are:
+
+```text
+evolution-results/ui-smoke/evolution-resume-ui.png
+evolution-results/ui-smoke/champion-watch-labeling.png
+```
+
+This patch changes no evolution semantics, checkpoint schema, genome, fitness,
+selection, mutation, learning, world mechanics, scientific result schema, or
+Watch Champion simulation behavior. Validation used base commit
+`a5db249e45f0d6a3ebcd2194e1f4cef2a59ca106`. No commit or push was performed.

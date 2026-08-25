@@ -7,6 +7,9 @@ import math
 from pathlib import Path
 import sys
 
+import torch
+
+from noralet.evolution.config import EVOLUTION_ID
 from noralet.ui.research_launcher import ProcessInvocation
 
 
@@ -94,6 +97,30 @@ class EvolutionWorkloadEstimate:
     maximum_training_ticks_per_generation: int
 
 
+@dataclass(frozen=True, slots=True)
+class EvolutionResumeMetadata:
+    checkpoint_path: Path
+    result_directory: Path
+    run_id: str
+    completed_generations: int
+    original_generation_target: int
+    population_size: int
+    elite_count: int
+    parent_pool_size: int
+    mutation_sigma: float
+    training_worlds: int
+    validation_worlds: int
+    noralets_per_world: int
+    maximum_ticks: int
+    initial_energy: float
+    initial_seed: int
+    device: str
+    best_candidate_id: str | None
+    best_generation: int | None
+    best_training_fitness: float | None
+    best_validation_fitness: float | None
+
+
 def estimate_evolution_workload(
     setup: EvolutionLaunchSetup,
 ) -> EvolutionWorkloadEstimate:
@@ -113,6 +140,109 @@ def estimate_evolution_workload(
         maximum_training_ticks_per_generation=(
             training_lives * setup.maximum_ticks
         ),
+    )
+
+
+def load_evolution_resume_metadata(
+    checkpoint_path: Path,
+) -> EvolutionResumeMetadata:
+    """Read locked checkpoint metadata without performing any resume work."""
+
+    path = Path(checkpoint_path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"evolution checkpoint does not exist: {path}")
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    if state.get("evolution_id") != EVOLUTION_ID:
+        raise ValueError("checkpoint is not Evolution Bootstrap v1 state")
+    configuration = state.get("configuration")
+    if not isinstance(configuration, dict):
+        raise ValueError("checkpoint configuration is missing")
+    completed = state.get("next_generation")
+    if type(completed) is not int or completed < 0:
+        raise ValueError("checkpoint completed-generation count is invalid")
+    best = state.get("best_state")
+    best_candidate_id = None
+    best_generation = None
+    best_training = None
+    best_validation = None
+    if best is not None:
+        candidate = best.get("candidate", {})
+        best_candidate_id = candidate.get("candidate_id")
+        best_generation = best.get("generation")
+        best_training = best.get("training_fitness")
+        best_validation = best.get("validation_fitness")
+    return EvolutionResumeMetadata(
+        checkpoint_path=path,
+        result_directory=path.parent,
+        run_id=path.parent.name,
+        completed_generations=completed,
+        original_generation_target=int(configuration["generation_count"]),
+        population_size=int(configuration["population_size"]),
+        elite_count=int(configuration["elite_count"]),
+        parent_pool_size=int(configuration["parent_pool_size"]),
+        mutation_sigma=float(configuration["mutation_sigma"]),
+        training_worlds=len(configuration["training_world_seeds"]),
+        validation_worlds=len(configuration["validation_world_seeds"]),
+        noralets_per_world=int(configuration["noralets_per_world"]),
+        maximum_ticks=int(configuration["max_ticks"]),
+        initial_energy=float(configuration["initial_body_energy"]),
+        initial_seed=int(configuration["initial_seed"]),
+        device=str(configuration["device"]),
+        best_candidate_id=best_candidate_id,
+        best_generation=best_generation,
+        best_training_fitness=(
+            None if best_training is None else float(best_training)
+        ),
+        best_validation_fitness=(
+            None if best_validation is None else float(best_validation)
+        ),
+    )
+
+
+def build_evolution_resume_invocation(
+    metadata: EvolutionResumeMetadata,
+    *,
+    target_generation: int,
+    device_override: str | None = None,
+    python_executable: str | None = None,
+    working_directory: Path | None = None,
+) -> ProcessInvocation:
+    """Construct only the generation/device overrides supported by resume."""
+
+    if not isinstance(metadata, EvolutionResumeMetadata):
+        raise TypeError("metadata must be EvolutionResumeMetadata")
+    if type(target_generation) is not int:
+        raise TypeError("target_generation must be an integer")
+    if target_generation <= metadata.completed_generations:
+        raise ValueError(
+            "continue-to generation must exceed completed generations "
+            f"({metadata.completed_generations})"
+        )
+    if device_override is not None:
+        if not isinstance(device_override, str):
+            raise TypeError("device_override must be a string or None")
+        device_override = device_override.strip().lower()
+        if device_override not in ("cpu", "cuda", "auto"):
+            raise ValueError("device_override must be cpu, cuda, auto, or None")
+    executable = sys.executable if python_executable is None else python_executable
+    directory = Path.cwd() if working_directory is None else Path(working_directory)
+    arguments = [
+        "-u",
+        "-m",
+        "noralet",
+        "evolution",
+        "basebrain-bootstrap",
+        "--generations",
+        str(target_generation),
+        "--resume",
+        str(metadata.checkpoint_path),
+    ]
+    if device_override is not None:
+        arguments.extend(("--device", device_override))
+    return ProcessInvocation(
+        program=executable,
+        arguments=tuple(arguments),
+        working_directory=directory,
     )
 
 

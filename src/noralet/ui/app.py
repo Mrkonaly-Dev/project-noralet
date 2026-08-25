@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -46,10 +47,13 @@ from noralet.ui.canvas import WorldCanvas
 from noralet.ui.inspector import NoraletInspector
 from noralet.ui.evolution_launcher import (
     EvolutionLaunchSetup,
+    EvolutionResumeMetadata,
     PILOT_PRESET_VALUES,
     STANDARD_PRESET_VALUES,
     build_evolution_invocation,
+    build_evolution_resume_invocation,
     evolution_directory_from_line,
+    load_evolution_resume_metadata,
 )
 from noralet.ui.research_launcher import (
     ProcessInvocation,
@@ -115,6 +119,7 @@ class LiveSimulationWidget(QWidget):
         self.session: LiveSession | None = None
         self._ticks_per_pulse = 1
         self._timer = QTimer(self)
+        self._champion_watch_active = False
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self._on_timer)
 
@@ -133,7 +138,8 @@ class LiveSimulationWidget(QWidget):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
         root.addWidget(splitter, 1)
-        root.addWidget(self._setup_group())
+        self.setup_group = self._setup_group()
+        root.addWidget(self.setup_group)
 
         self.canvas.selection_changed.connect(self._selection_changed)
         self.set_speed_mode("1x")
@@ -159,7 +165,7 @@ class LiveSimulationWidget(QWidget):
         self.start_button.clicked.connect(self.start)
         self.pause_button.clicked.connect(self.pause)
         self.step_button.clicked.connect(self.step_once)
-        self.reset_button.clicked.connect(lambda: self.reset_run())
+        self.reset_button.clicked.connect(self._reset_or_return_to_baseline)
 
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.VLine)
@@ -185,6 +191,13 @@ class LiveSimulationWidget(QWidget):
     def _setup_group(self) -> QGroupBox:
         group = QGroupBox("Baseline world · run setup")
         grid = QGridLayout(group)
+        self.champion_metadata_label = QLabel()
+        self.champion_metadata_label.setObjectName("championWatchMetadata")
+        self.champion_metadata_label.setWordWrap(True)
+        self.champion_metadata_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.champion_metadata_label.setVisible(False)
         self.seed_edit = QLineEdit("1")
         self.population_spin = _positive_spinbox(value=6, maximum=64)
         self.device_combo = QComboBox()
@@ -210,13 +223,46 @@ class LiveSimulationWidget(QWidget):
             ("Maximum ticks", self.maximum_ticks_spin),
             ("Learning mode", self.condition_combo),
         )
+        self._baseline_setup_fields = tuple(widget for _, widget in fields)
+        baseline_widgets: list[QWidget] = []
         for column, (label, widget) in enumerate(fields):
-            grid.addWidget(QLabel(label), 0, column)
+            label_widget = QLabel(label)
+            grid.addWidget(label_widget, 0, column)
             grid.addWidget(widget, 1, column)
+            baseline_widgets.extend((label_widget, widget))
+        self._baseline_setup_widgets = tuple(baseline_widgets)
         self.status_label = QLabel("Ready · configure, then Start or Reset")
         self.status_label.setObjectName("statusLabel")
         grid.addWidget(self.status_label, 2, 0, 1, len(fields))
+        grid.addWidget(self.champion_metadata_label, 3, 0, 1, len(fields))
         return group
+
+    def _reset_or_return_to_baseline(self) -> None:
+        if self._champion_watch_active:
+            self._return_to_baseline_setup()
+            return
+        self.reset_run()
+
+    def _set_baseline_presentation(self) -> None:
+        self._champion_watch_active = False
+        self.setup_group.setTitle("Baseline world · run setup")
+        self.reset_button.setText("Reset")
+        self.champion_metadata_label.clear()
+        self.champion_metadata_label.setVisible(False)
+        for widget in self._baseline_setup_widgets:
+            widget.setVisible(True)
+        for widget in self._baseline_setup_fields:
+            widget.setEnabled(True)
+
+    def _return_to_baseline_setup(self) -> None:
+        self.pause()
+        self.session = None
+        self.canvas.set_session(None)
+        self.inspector.clear()
+        self._set_baseline_presentation()
+        self.status_label.setText("Ready · configure, then Start or Reset")
+        self.session_changed.emit(None)
+        self._refresh_observer_widgets()
 
     def current_setup(self) -> LiveRunSetup:
         seed_text = self.seed_edit.text().strip()
@@ -250,10 +296,59 @@ class LiveSimulationWidget(QWidget):
         return True
 
     def attach_session(self, session: LiveSession, status: str) -> None:
-        """Attach a freshly constructed baseline or champion session."""
+        """Attach a freshly constructed baseline session."""
 
         if not isinstance(session, LiveSession):
             raise TypeError("session must be a LiveSession")
+        self._set_baseline_presentation()
+        self._attach_session(session, status)
+
+    def attach_champion_session(
+        self,
+        session: LiveSession,
+        metadata: dict[str, object],
+        result_directory: Path,
+    ) -> None:
+        """Attach a champion life while making its provenance unambiguous."""
+
+        if not isinstance(session, LiveSession):
+            raise TypeError("session must be a LiveSession")
+        candidate_id = str(metadata["candidate_id"])
+        source_generation = int(metadata["generation"])
+        birth_energy = float(metadata["initial_body_energy"])
+        configuration = metadata.get("configuration")
+        source_device = (
+            configuration.get("device", "—")
+            if isinstance(configuration, dict)
+            else "—"
+        )
+        result_directory = Path(result_directory).resolve()
+        self._champion_watch_active = True
+        self.setup_group.setTitle("CHAMPION WATCH · observer-only metadata")
+        self.reset_button.setText("Return to baseline setup")
+        for widget in self._baseline_setup_widgets:
+            widget.setVisible(False)
+        for widget in self._baseline_setup_fields:
+            widget.setEnabled(False)
+        self.champion_metadata_label.setText(
+            f"Genome / candidate ID: {candidate_id}\n"
+            f"Source evolution run: {result_directory.name}\n"
+            f"Source result directory: {result_directory}\n"
+            f"Source generation: {source_generation}\n"
+            "Life: fresh learned life (not a replay)\n"
+            f"Birth Energy: {birth_energy:g} eU\n"
+            f"Source evolution device: {source_device}\n"
+            f"Watch device: {session.setup.device}\n"
+            f"Current simulation: seed {session.setup.simulation_seed} · "
+            f"population {session.setup.population}"
+        )
+        self.champion_metadata_label.setVisible(True)
+        self._attach_session(
+            session,
+            f"Paused · champion {candidate_id} · fresh learned life",
+        )
+
+    def _attach_session(self, session: LiveSession, status: str) -> None:
         self.pause()
         self.session = session
         self.canvas.set_session(session)
@@ -627,6 +722,8 @@ class EvolutionWidget(QWidget):
         self._cancel_requested = False
         self._invocation: ProcessInvocation | None = None
         self._applying_preset = False
+        self.resume_metadata: EvolutionResumeMetadata | None = None
+        self._run_mode = "fresh"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
@@ -634,7 +731,10 @@ class EvolutionWidget(QWidget):
         title = QLabel("001 · BASEBRAIN EVOLUTION BOOTSTRAP")
         title.setObjectName("pageTitle")
         root.addWidget(title)
-        root.addWidget(self._setup_group())
+        self.setup_group = self._setup_group()
+        root.addWidget(self.setup_group)
+        self.resume_group = self._resume_group()
+        root.addWidget(self.resume_group)
         root.addLayout(self._buttons())
         self.progress_label = QLabel("Ready")
         self.progress_label.setObjectName("statusLabel")
@@ -649,6 +749,43 @@ class EvolutionWidget(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         root.addWidget(self.result_label)
+
+    def _resume_group(self) -> QGroupBox:
+        group = QGroupBox("Resume evolution · checkpoint settings locked")
+        layout = QVBoxLayout(group)
+        notice = QLabel(
+            "Checkpoint-derived scientific configuration is authoritative and "
+            "read-only. Resume may change only the total generation target and "
+            "an optional device override."
+        )
+        notice.setWordWrap(True)
+        layout.addWidget(notice)
+        self.resume_metadata_label = QLabel()
+        self.resume_metadata_label.setObjectName("resumeMetadata")
+        self.resume_metadata_label.setWordWrap(True)
+        self.resume_metadata_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.resume_metadata_label)
+
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Continue to generation (total)"))
+        self.continue_to_spin = QSpinBox()
+        self.continue_to_spin.setRange(1, 1_000_000)
+        controls.addWidget(self.continue_to_spin)
+        controls.addWidget(QLabel("Device override (optional)"))
+        self.resume_device_combo = QComboBox()
+        controls.addWidget(self.resume_device_combo)
+        self.resume_start_button = QPushButton("Resume to target")
+        self.resume_cancel_button = QPushButton("Cancel resume")
+        controls.addWidget(self.resume_start_button)
+        controls.addWidget(self.resume_cancel_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+        self.resume_start_button.clicked.connect(lambda: self.start_resume())
+        self.resume_cancel_button.clicked.connect(self._cancel_resume_mode)
+        group.setVisible(False)
+        return group
 
     def _setup_group(self) -> QGroupBox:
         group = QGroupBox("Evolution Bootstrap v1")
@@ -821,18 +958,25 @@ class EvolutionWidget(QWidget):
     def _buttons(self) -> QHBoxLayout:
         layout = QHBoxLayout()
         self.run_button = QPushButton("Start evolution")
+        self.resume_select_button = QPushButton("Resume evolution…")
+        self.continue_button = QPushButton("Continue this evolution")
         self.stop_button = QPushButton("Stop")
         self.watch_button = QPushButton("Watch Champion")
         self.open_button = QPushButton("Open result folder")
         self.stop_button.setEnabled(False)
+        self.continue_button.setEnabled(False)
         self.watch_button.setEnabled(False)
         self.open_button.setEnabled(False)
         self.run_button.clicked.connect(lambda: self.start_evolution())
+        self.resume_select_button.clicked.connect(self._select_resume_checkpoint)
+        self.continue_button.clicked.connect(self._continue_this_evolution)
         self.stop_button.clicked.connect(self.stop_evolution)
         self.watch_button.clicked.connect(self._request_watch)
         self.open_button.clicked.connect(self.open_result_folder)
         for button in (
             self.run_button,
+            self.resume_select_button,
+            self.continue_button,
             self.stop_button,
             self.watch_button,
             self.open_button,
@@ -840,6 +984,97 @@ class EvolutionWidget(QWidget):
             layout.addWidget(button)
         layout.addStretch(1)
         return layout
+
+    def _select_resume_checkpoint(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select evolution-state.pt",
+            str(self.result_directory or Path.cwd()),
+            "Evolution state (evolution-state.pt);;PyTorch checkpoint (*.pt)",
+        )
+        if selected:
+            self.load_resume_checkpoint(Path(selected))
+
+    def _continue_this_evolution(self) -> None:
+        if self.result_directory is None:
+            return
+        self.load_resume_checkpoint(self.result_directory / "evolution-state.pt")
+
+    def load_resume_checkpoint(
+        self,
+        checkpoint_path: Path,
+        *,
+        show_errors: bool = True,
+    ) -> bool:
+        """Populate the observer UI from authoritative checkpoint metadata."""
+
+        if self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning:
+            return False
+        try:
+            metadata = load_evolution_resume_metadata(checkpoint_path)
+        except Exception as error:
+            self.progress_label.setText(f"Could not load checkpoint: {error}")
+            if show_errors:
+                QMessageBox.warning(self, "Invalid evolution checkpoint", str(error))
+            return False
+        self.resume_metadata = metadata
+        self.result_directory = metadata.result_directory
+        self.result_label.setText(f"Result directory: {metadata.result_directory}")
+        best_lines = "Current / best champion: —"
+        if metadata.best_candidate_id is not None:
+            best_lines = (
+                f"Current / best champion: {metadata.best_candidate_id} · "
+                f"generation {metadata.best_generation} · "
+                f"training {metadata.best_training_fitness} · "
+                f"validation {metadata.best_validation_fitness}"
+            )
+        self.resume_metadata_label.setText(
+            f"Evolution run ID: {metadata.run_id}\n"
+            f"Result directory: {metadata.result_directory}\n"
+            f"Generations already completed: {metadata.completed_generations}\n"
+            f"Original generation target: {metadata.original_generation_target}\n"
+            f"Population size: {metadata.population_size}  ·  "
+            f"Elite count: {metadata.elite_count}  ·  "
+            f"Parent pool: {metadata.parent_pool_size}\n"
+            f"Mutation sigma: {metadata.mutation_sigma:g}  ·  "
+            f"Training / validation worlds: {metadata.training_worlds} / "
+            f"{metadata.validation_worlds}\n"
+            f"Noralets / world: {metadata.noralets_per_world}  ·  "
+            f"Max ticks: {metadata.maximum_ticks}  ·  "
+            f"Initial Energy: {metadata.initial_energy:g} eU\n"
+            f"Original evolution seed: {metadata.initial_seed}  ·  "
+            f"Saved device: {metadata.device}\n"
+            f"{best_lines}"
+        )
+        self.continue_to_spin.setMaximum(
+            max(1_000_000, metadata.completed_generations + 100_000)
+        )
+        self.continue_to_spin.setValue(metadata.completed_generations + 1)
+        self.resume_device_combo.clear()
+        self.resume_device_combo.addItem(
+            f"Saved device ({metadata.device}) · no override",
+            None,
+        )
+        self.resume_device_combo.addItem("Auto override", "auto")
+        self.resume_device_combo.addItem("CPU override", "cpu")
+        self.resume_device_combo.addItem("CUDA override", "cuda")
+        self.setup_group.setEnabled(False)
+        self.resume_group.setVisible(True)
+        self.progress_label.setText(
+            f"Checkpoint loaded · {metadata.completed_generations} generations "
+            "completed · scientific settings locked"
+        )
+        self._refresh_result_actions()
+        return True
+
+    def _cancel_resume_mode(self) -> None:
+        if self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning:
+            return
+        self.resume_metadata = None
+        self.resume_group.setVisible(False)
+        self.setup_group.setEnabled(True)
+        self.progress_label.setText("Ready")
+        self._refresh_result_actions()
 
     def current_setup(self) -> EvolutionLaunchSetup:
         return EvolutionLaunchSetup(
@@ -873,11 +1108,56 @@ class EvolutionWidget(QWidget):
             if show_errors:
                 QMessageBox.warning(self, "Invalid evolution setup", str(error))
             return False
+        self.resume_metadata = None
+        self.resume_group.setVisible(False)
+        self.setup_group.setEnabled(True)
+        self._run_mode = "fresh"
+        return self._start_process(
+            invocation,
+            f"Starting {preset_label} Evolution Bootstrap v1…",
+            clear_result=True,
+        )
+
+    def start_resume(self, *, show_errors: bool = True) -> bool:
+        if self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning:
+            return False
+        if self.resume_metadata is None:
+            self.progress_label.setText("Select an evolution-state.pt first")
+            return False
+        try:
+            target = self.continue_to_spin.value()
+            override = self.resume_device_combo.currentData()
+            invocation = build_evolution_resume_invocation(
+                self.resume_metadata,
+                target_generation=target,
+                device_override=None if override is None else str(override),
+            )
+        except Exception as error:
+            self.progress_label.setText(f"Invalid resume target: {error}")
+            if show_errors:
+                QMessageBox.warning(self, "Invalid resume target", str(error))
+            return False
+        self.result_directory = self.resume_metadata.result_directory
+        self.result_label.setText(f"Result directory: {self.result_directory}")
+        self._run_mode = "resume"
+        return self._start_process(
+            invocation,
+            f"Resuming generation {self.resume_metadata.completed_generations} "
+            f"to total generation {target}…",
+            clear_result=False,
+        )
+
+    def _start_process(
+        self,
+        invocation: ProcessInvocation,
+        status: str,
+        *,
+        clear_result: bool,
+    ) -> bool:
         self.output.clear()
-        self.result_directory = None
-        self.result_label.setText("Result directory: —")
-        self.open_button.setEnabled(False)
-        self.watch_button.setEnabled(False)
+        if clear_result:
+            self.result_directory = None
+            self.result_label.setText("Result directory: —")
         self._output_buffer = ""
         self._cancel_requested = False
         self._invocation = invocation
@@ -888,12 +1168,9 @@ class EvolutionWidget(QWidget):
         process.finished.connect(self._process_finished)
         process.errorOccurred.connect(self._process_error)
         self.process = process
-        self.run_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
-        self.progress_label.setText(
-            f"Starting {preset_label} Evolution Bootstrap v1…"
-        )
+        self.progress_label.setText(status)
         process.start(invocation.program, list(invocation.arguments))
+        self._refresh_result_actions()
         return True
 
     def stop_evolution(self) -> None:
@@ -956,6 +1233,10 @@ class EvolutionWidget(QWidget):
             self._refresh_result_actions()
 
     def _refresh_result_actions(self) -> None:
+        running = (
+            self.process is not None
+            and self.process.state() != QProcess.ProcessState.NotRunning
+        )
         available = (
             self.result_directory is not None
             and self.result_directory.is_dir()
@@ -965,7 +1246,21 @@ class EvolutionWidget(QWidget):
             available
             and (self.result_directory / "champion" / "best.pt").is_file()
         )
-        self.watch_button.setEnabled(bool(champion_exists))
+        checkpoint_exists = (
+            available
+            and (self.result_directory / "evolution-state.pt").is_file()
+        )
+        self.run_button.setEnabled(not running and self.resume_metadata is None)
+        self.resume_select_button.setEnabled(not running)
+        self.continue_button.setEnabled(bool(checkpoint_exists) and not running)
+        self.stop_button.setEnabled(running)
+        self.watch_button.setEnabled(bool(champion_exists) and not running)
+        self.resume_start_button.setEnabled(
+            not running and self.resume_metadata is not None
+        )
+        self.resume_cancel_button.setEnabled(
+            not running and self.resume_metadata is not None
+        )
 
     def _process_finished(
         self,
@@ -976,6 +1271,10 @@ class EvolutionWidget(QWidget):
         if self._output_buffer:
             self._parse_output_line(self._output_buffer)
             self._output_buffer = ""
+        if self._run_mode == "resume" and self.result_directory is not None:
+            checkpoint = self.result_directory / "evolution-state.pt"
+            if checkpoint.is_file():
+                self.load_resume_checkpoint(checkpoint, show_errors=False)
         successful = (
             exit_status == QProcess.ExitStatus.NormalExit
             and exit_code == 0
@@ -990,8 +1289,6 @@ class EvolutionWidget(QWidget):
                 f"Evolution process failed with exit code {exit_code}"
             )
         self._refresh_result_actions()
-        self.run_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
 
     def _process_error(self, error: QProcess.ProcessError) -> None:
         if error == QProcess.ProcessError.Crashed and self._cancel_requested:
@@ -1001,8 +1298,7 @@ class EvolutionWidget(QWidget):
                 f"Evolution process error: {self.process.errorString()}"
             )
         if error == QProcess.ProcessError.FailedToStart:
-            self.run_button.setEnabled(True)
-            self.stop_button.setEnabled(False)
+            self._refresh_result_actions()
 
     def _request_watch(self) -> None:
         if self.result_directory is not None:
@@ -1069,9 +1365,10 @@ class NoraletMainWindow(QMainWindow):
                 LearningCondition.FULL_CURRENT_BRAIN.value
             )
         )
-        self.live.attach_session(
+        self.live.attach_champion_session(
             session,
-            f"Paused · champion {metadata['candidate_id']} · fresh learned life",
+            metadata,
+            result_directory,
         )
         self.tabs.setCurrentWidget(self.live)
 
