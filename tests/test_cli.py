@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 
 
@@ -43,7 +44,47 @@ class HeadlessCliTests(unittest.TestCase):
         )
         self.assertEqual(completed.stderr, "")
 
+    def test_research_cli_writes_a_small_cpu_batch(self) -> None:
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(SOURCE_ROOT)
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "noralet",
+                    "research",
+                    "baseline-lifetime-adaptation",
+                    "--seeds",
+                    "2",
+                    "--max-ticks",
+                    "2",
+                    "--sample-every",
+                    "1",
+                    "--population",
+                    "2",
+                    "--device",
+                    "cpu",
+                    "--conditions",
+                    "no-learning",
+                    "--output-root",
+                    temporary,
+                ],
+                cwd=PROJECT_ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("Research outputs:", completed.stdout)
+            result_roots = list(
+                (Path(temporary) / "001-baseline-lifetime-adaptation").iterdir()
+            )
+            self.assertEqual(len(result_roots), 1)
+            self.assertTrue((result_roots[0] / "manifest.json").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
-
