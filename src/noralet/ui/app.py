@@ -46,13 +46,18 @@ from noralet.evolution.watch import create_champion_live_session
 from noralet.ui.canvas import WorldCanvas
 from noralet.ui.inspector import NoraletInspector
 from noralet.ui.evolution_launcher import (
+    DISTRIBUTIONAL_PRESET_VALUES,
+    DistributionalEvolutionLaunchSetup,
     EvolutionLaunchSetup,
+    EvolutionForkMetadata,
     EvolutionResumeMetadata,
     PILOT_PRESET_VALUES,
     STANDARD_PRESET_VALUES,
+    build_distributional_evolution_invocation,
     build_evolution_invocation,
     build_evolution_resume_invocation,
     evolution_directory_from_line,
+    load_evolution_fork_metadata,
     load_evolution_resume_metadata,
 )
 from noralet.ui.research_launcher import (
@@ -323,18 +328,33 @@ class LiveSimulationWidget(QWidget):
             else "—"
         )
         result_directory = Path(result_directory).resolve()
+        benchmark_best = metadata.get("champion_kind") == "benchmark-best"
         self._champion_watch_active = True
-        self.setup_group.setTitle("CHAMPION WATCH · observer-only metadata")
+        self.setup_group.setTitle(
+            "BENCHMARK-BEST CHAMPION WATCH · observer-only metadata"
+            if benchmark_best
+            else "CHAMPION WATCH · observer-only metadata"
+        )
         self.reset_button.setText("Return to baseline setup")
         for widget in self._baseline_setup_widgets:
             widget.setVisible(False)
         for widget in self._baseline_setup_fields:
             widget.setEnabled(False)
+        benchmark_lines = ""
+        if benchmark_best:
+            benchmark_lines = (
+                f"Champion role: benchmark-best (fixed benchmark bank)\n"
+                f"Benchmark mean lifetime: "
+                f"{float(metadata['benchmark_mean_lifetime']):.6g}\n"
+                f"Benchmark median lifetime: "
+                f"{float(metadata['benchmark_median_lifetime']):.6g}\n"
+            )
         self.champion_metadata_label.setText(
             f"Genome / candidate ID: {candidate_id}\n"
             f"Source evolution run: {result_directory.name}\n"
             f"Source result directory: {result_directory}\n"
             f"Source generation: {source_generation}\n"
+            f"{benchmark_lines}"
             "Life: fresh learned life (not a replay)\n"
             f"Birth Energy: {birth_energy:g} eU\n"
             f"Source evolution device: {source_device}\n"
@@ -702,7 +722,7 @@ class ResearchWidget(QWidget):
 
 
 class EvolutionWidget(QWidget):
-    """QProcess launcher for the external Evolution Bootstrap v1 harness."""
+    """QProcess launcher for supported external evolution protocols."""
 
     watch_requested = Signal(object)
     _GENERATION_PATTERN = re.compile(
@@ -712,6 +732,10 @@ class EvolutionWidget(QWidget):
     _CANDIDATE_PATTERN = re.compile(
         r"Generation (?P<generation>\d+) candidate "
         r"\[(?P<current>\d+)/(?P<total>\d+)\] (?P<candidate>\S+)"
+    )
+    _DISTRIBUTIONAL_GENERATION_PATTERN = re.compile(
+        r"Generation (?P<generation>\d+) complete: best selection fitness "
+        r"(?P<selection>[^;]+); benchmark (?P<benchmark>.+)"
     )
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -723,14 +747,15 @@ class EvolutionWidget(QWidget):
         self._invocation: ProcessInvocation | None = None
         self._applying_preset = False
         self.resume_metadata: EvolutionResumeMetadata | None = None
+        self.fork_metadata: EvolutionForkMetadata | None = None
         self._run_mode = "fresh"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(10)
-        title = QLabel("001 · BASEBRAIN EVOLUTION BOOTSTRAP")
-        title.setObjectName("pageTitle")
-        root.addWidget(title)
+        self.page_title = QLabel("002 · BASEBRAIN DISTRIBUTIONAL EVOLUTION")
+        self.page_title.setObjectName("pageTitle")
+        root.addWidget(self.page_title)
         self.setup_group = self._setup_group()
         root.addWidget(self.setup_group)
         self.resume_group = self._resume_group()
@@ -788,17 +813,23 @@ class EvolutionWidget(QWidget):
         return group
 
     def _setup_group(self) -> QGroupBox:
-        group = QGroupBox("Evolution Bootstrap v1")
+        group = QGroupBox("Distributional Evolution v2 · current protocol")
+        self.setup_group = group
         layout = QVBoxLayout(group)
         form = QFormLayout()
+        self.protocol_combo = QComboBox()
+        self.protocol_combo.addItem("Distributional Evolution v2", "v2")
+        self.protocol_combo.addItem("Evolution Bootstrap v1 (legacy)", "v1")
         self.preset_combo = QComboBox()
         self.preset_combo.addItems(("Pilot", "Standard", "Custom"))
         self.generations_spin = _positive_spinbox(value=5, maximum=100_000)
         self.device_combo = QComboBox()
-        self.device_combo.addItem("CUDA", "cuda")
         self.device_combo.addItem("CPU", "cpu")
+        self.device_combo.addItem("CUDA", "cuda")
         self.device_combo.addItem("Auto", "auto")
-        form.addRow("Preset", self.preset_combo)
+        form.addRow("Protocol", self.protocol_combo)
+        self.preset_form_label = QLabel("Preset")
+        form.addRow(self.preset_form_label, self.preset_combo)
         form.addRow("Generations", self.generations_spin)
         form.addRow("Device", self.device_combo)
         layout.addLayout(form)
@@ -818,6 +849,7 @@ class EvolutionWidget(QWidget):
         self.parent_pool_spin = _positive_spinbox(value=4, maximum=100_000)
         self.training_worlds_spin = _positive_spinbox(value=2, maximum=100_000)
         self.validation_worlds_spin = _positive_spinbox(value=2, maximum=100_000)
+        self.benchmark_interval_spin = _positive_spinbox(value=5, maximum=100_000)
         self.noralets_per_world_spin = _positive_spinbox(value=4, maximum=100_000)
         self.evolution_maximum_ticks_spin = _positive_spinbox(
             value=1_000,
@@ -840,15 +872,19 @@ class EvolutionWidget(QWidget):
             ("Parent pool size", self.parent_pool_spin),
             ("Training worlds", self.training_worlds_spin),
             ("Validation worlds", self.validation_worlds_spin),
+            ("Benchmark every N generations", self.benchmark_interval_spin),
             ("Noralets / world", self.noralets_per_world_spin),
             ("Maximum ticks", self.evolution_maximum_ticks_spin),
             ("Mutation sigma", self.mutation_sigma_spin),
             ("Initial Energy", self.initial_energy_spin),
         )
+        self._advanced_label_widgets: dict[QWidget, QLabel] = {}
         for index, (label, widget) in enumerate(advanced_fields):
             row, pair = divmod(index, 3)
             column = pair * 2
-            advanced.addWidget(QLabel(label), row, column)
+            label_widget = QLabel(label)
+            self._advanced_label_widgets[widget] = label_widget
+            advanced.addWidget(label_widget, row, column)
             advanced.addWidget(widget, row, column + 1)
         layout.addWidget(self.advanced_panel)
         self.advanced_panel.setVisible(False)
@@ -859,14 +895,24 @@ class EvolutionWidget(QWidget):
         fitness = QLabel(
             "Fitness: mean observed lifetime · external viability proxy"
         )
+        self.fitness_label = fitness
         fitness.setWordWrap(True)
         layout.addWidget(fitness)
+        self.fork_metadata_label = QLabel()
+        self.fork_metadata_label.setObjectName("resumeMetadata")
+        self.fork_metadata_label.setWordWrap(True)
+        self.fork_metadata_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.fork_metadata_label.setVisible(False)
+        layout.addWidget(self.fork_metadata_label)
 
         self.advanced_button.toggled.connect(self._toggle_advanced)
+        self.protocol_combo.currentIndexChanged.connect(self._protocol_changed)
         self.preset_combo.currentTextChanged.connect(self.apply_preset)
         for widget in self._preset_controlled_fields():
             widget.valueChanged.connect(self._scientific_field_edited)
-        self.apply_preset("Pilot")
+        self._protocol_changed()
         return group
 
     def _preset_controlled_fields(self) -> tuple[QSpinBox | QDoubleSpinBox, ...]:
@@ -877,6 +923,7 @@ class EvolutionWidget(QWidget):
             self.parent_pool_spin,
             self.training_worlds_spin,
             self.validation_worlds_spin,
+            self.benchmark_interval_spin,
             self.noralets_per_world_spin,
             self.evolution_maximum_ticks_spin,
             self.mutation_sigma_spin,
@@ -901,6 +948,12 @@ class EvolutionWidget(QWidget):
         )
         self._applying_preset = True
         try:
+            protocol_blocked = self.protocol_combo.blockSignals(True)
+            self.protocol_combo.setCurrentIndex(
+                self.protocol_combo.findData("v1")
+            )
+            self.protocol_combo.blockSignals(protocol_blocked)
+            self._apply_protocol_presentation("v1")
             blocked = self.preset_combo.blockSignals(True)
             self.preset_combo.setCurrentText(name)
             self.preset_combo.blockSignals(blocked)
@@ -922,6 +975,83 @@ class EvolutionWidget(QWidget):
             else "Standard — full default protocol"
         )
         self._update_workload_estimate()
+
+    def _protocol_changed(self, index: int = -1) -> None:
+        del index
+        protocol = str(self.protocol_combo.currentData())
+        self.fork_metadata = None
+        self.population_spin.setEnabled(True)
+        if hasattr(self, "fork_metadata_label"):
+            self.fork_metadata_label.setVisible(False)
+        self._applying_preset = True
+        try:
+            if protocol == "v2":
+                values = DISTRIBUTIONAL_PRESET_VALUES
+                self.generations_spin.setValue(values["generations"])
+                self.population_spin.setValue(values["population_size"])
+                self.elite_spin.setValue(values["elite_count"])
+                self.parent_pool_spin.setValue(values["parent_pool_size"])
+                self.training_worlds_spin.setValue(values["selection_worlds"])
+                self.validation_worlds_spin.setValue(values["benchmark_worlds"])
+                self.benchmark_interval_spin.setValue(
+                    values["benchmark_interval"]
+                )
+                self.noralets_per_world_spin.setValue(
+                    values["noralets_per_world"]
+                )
+                self.evolution_maximum_ticks_spin.setValue(
+                    values["maximum_ticks"]
+                )
+                self.mutation_sigma_spin.setValue(values["mutation_sigma"])
+                self.initial_energy_spin.setValue(values["initial_energy"])
+                self.device_combo.setCurrentIndex(
+                    self.device_combo.findData("cpu")
+                )
+                blocked = self.preset_combo.blockSignals(True)
+                self.preset_combo.setCurrentText("Pilot")
+                self.preset_combo.blockSignals(blocked)
+                self.preset_description.setText(
+                    "Current v2 protocol · deterministic distributional defaults"
+                )
+            else:
+                self.apply_preset("Pilot")
+        finally:
+            self._applying_preset = False
+        self._apply_protocol_presentation(protocol)
+        self._update_workload_estimate()
+
+    def _apply_protocol_presentation(self, protocol: str) -> None:
+        is_v2 = protocol == "v2"
+        self.setup_group.setTitle(
+            "Distributional Evolution v2 · current protocol"
+            if is_v2
+            else "Evolution Bootstrap v1 · legacy protocol"
+        )
+        self.page_title.setText(
+            "002 · BASEBRAIN DISTRIBUTIONAL EVOLUTION"
+            if is_v2
+            else "001 · BASEBRAIN EVOLUTION BOOTSTRAP"
+        )
+        self._advanced_label_widgets[self.training_worlds_spin].setText(
+            "Selection worlds / generation" if is_v2 else "Training worlds"
+        )
+        self._advanced_label_widgets[self.validation_worlds_spin].setText(
+            "Fixed benchmark worlds" if is_v2 else "Validation worlds"
+        )
+        self._advanced_label_widgets[self.benchmark_interval_spin].setVisible(
+            is_v2
+        )
+        self.benchmark_interval_spin.setVisible(is_v2)
+        self.preset_form_label.setVisible(not is_v2)
+        self.preset_combo.setVisible(not is_v2)
+        if is_v2 and not self.advanced_button.isChecked():
+            self.advanced_button.setChecked(True)
+        self.fitness_label.setText(
+            "Selection fitness: mean lifetime within current-generation worlds · "
+            "longitudinal progress: fixed benchmark only"
+            if is_v2
+            else "Fitness: mean observed lifetime · external viability proxy"
+        )
 
     def _scientific_field_edited(self, value: object = None) -> None:
         del value
@@ -949,15 +1079,23 @@ class EvolutionWidget(QWidget):
             * self.noralets_per_world_spin.value()
         )
         maximum_ticks = training_lives * self.evolution_maximum_ticks_spin.value()
-        self.workload_label.setText(
-            f"Training lives / generation: {training_lives:,}  ·  "
-            f"Champion validation lives / generation: {validation_lives:,}  ·  "
-            f"Maximum training ticks / generation: {maximum_ticks:,}"
-        )
+        if str(self.protocol_combo.currentData()) == "v2":
+            self.workload_label.setText(
+                f"Selection lives / generation: {training_lives:,}  ·  "
+                f"Benchmark lives / benchmark: {validation_lives:,}  ·  "
+                f"Maximum selection ticks / generation: {maximum_ticks:,}"
+            )
+        else:
+            self.workload_label.setText(
+                f"Training lives / generation: {training_lives:,}  ·  "
+                f"Champion validation lives / generation: {validation_lives:,}  ·  "
+                f"Maximum training ticks / generation: {maximum_ticks:,}"
+            )
 
     def _buttons(self) -> QHBoxLayout:
         layout = QHBoxLayout()
         self.run_button = QPushButton("Start evolution")
+        self.fork_button = QPushButton("Fork from previous evolution…")
         self.resume_select_button = QPushButton("Resume evolution…")
         self.continue_button = QPushButton("Continue this evolution")
         self.stop_button = QPushButton("Stop")
@@ -968,6 +1106,7 @@ class EvolutionWidget(QWidget):
         self.watch_button.setEnabled(False)
         self.open_button.setEnabled(False)
         self.run_button.clicked.connect(lambda: self.start_evolution())
+        self.fork_button.clicked.connect(self._select_fork_checkpoint)
         self.resume_select_button.clicked.connect(self._select_resume_checkpoint)
         self.continue_button.clicked.connect(self._continue_this_evolution)
         self.stop_button.clicked.connect(self.stop_evolution)
@@ -975,6 +1114,7 @@ class EvolutionWidget(QWidget):
         self.open_button.clicked.connect(self.open_result_folder)
         for button in (
             self.run_button,
+            self.fork_button,
             self.resume_select_button,
             self.continue_button,
             self.stop_button,
@@ -984,6 +1124,58 @@ class EvolutionWidget(QWidget):
             layout.addWidget(button)
         layout.addStretch(1)
         return layout
+
+    def _select_fork_checkpoint(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select v1 evolution-state.pt to fork",
+            str(self.result_directory or Path.cwd()),
+            "Evolution state (evolution-state.pt);;PyTorch checkpoint (*.pt)",
+        )
+        if selected:
+            self.load_fork_checkpoint(Path(selected))
+
+    def load_fork_checkpoint(
+        self,
+        checkpoint_path: Path,
+        *,
+        show_errors: bool = True,
+    ) -> bool:
+        """Select a v1 population checkpoint as a fresh v2 generation zero."""
+
+        if self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning:
+            return False
+        try:
+            metadata = load_evolution_fork_metadata(checkpoint_path)
+        except Exception as error:
+            self.progress_label.setText(f"Could not load fork source: {error}")
+            if show_errors:
+                QMessageBox.warning(self, "Invalid v1 fork source", str(error))
+            return False
+        blocked = self.protocol_combo.blockSignals(True)
+        self.protocol_combo.setCurrentIndex(self.protocol_combo.findData("v2"))
+        self.protocol_combo.blockSignals(blocked)
+        self._protocol_changed()
+        self.fork_metadata = metadata
+        self.population_spin.setValue(metadata.population_size)
+        self.elite_spin.setValue(min(2, metadata.population_size))
+        self.parent_pool_spin.setValue(min(4, metadata.population_size))
+        self.population_spin.setEnabled(False)
+        self.fork_metadata_label.setText(
+            "FORK V1 → V2 · new lineage, not resume\n"
+            f"Source lineage: {metadata.source_run_id}\n"
+            f"Source checkpoint: {metadata.checkpoint_path}\n"
+            f"Source completed generation: {metadata.completed_generations}\n"
+            f"Copied final population: {metadata.population_size} genomes\n"
+            "New protocol: 002-basebrain-distributional-evolution · "
+            "new generation 0"
+        )
+        self.fork_metadata_label.setVisible(True)
+        self.progress_label.setText(
+            "v1 fork source loaded · starting creates a distinct v2 result"
+        )
+        self._refresh_result_actions()
+        return True
 
     def _select_resume_checkpoint(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
@@ -1018,17 +1210,44 @@ class EvolutionWidget(QWidget):
                 QMessageBox.warning(self, "Invalid evolution checkpoint", str(error))
             return False
         self.resume_metadata = metadata
+        self.fork_metadata = None
+        protocol = (
+            "v2"
+            if metadata.evolution_id.endswith("distributional-evolution")
+            else "v1"
+        )
+        blocked = self.protocol_combo.blockSignals(True)
+        self.protocol_combo.setCurrentIndex(self.protocol_combo.findData(protocol))
+        self.protocol_combo.blockSignals(blocked)
+        self._apply_protocol_presentation(protocol)
         self.result_directory = metadata.result_directory
         self.result_label.setText(f"Result directory: {metadata.result_directory}")
         best_lines = "Current / best champion: —"
         if metadata.best_candidate_id is not None:
-            best_lines = (
-                f"Current / best champion: {metadata.best_candidate_id} · "
-                f"generation {metadata.best_generation} · "
-                f"training {metadata.best_training_fitness} · "
-                f"validation {metadata.best_validation_fitness}"
-            )
+            if metadata.evolution_id.endswith("distributional-evolution"):
+                best_lines = (
+                    f"Benchmark-best champion: {metadata.best_candidate_id} · "
+                    f"generation {metadata.best_generation} · "
+                    f"selection {metadata.best_training_fitness} · "
+                    f"benchmark mean {metadata.best_validation_fitness}"
+                )
+            else:
+                best_lines = (
+                    f"Current / best champion: {metadata.best_candidate_id} · "
+                    f"generation {metadata.best_generation} · "
+                    f"training {metadata.best_training_fitness} · "
+                    f"validation {metadata.best_validation_fitness}"
+                )
+        worlds_line = (
+            f"Selection worlds / generation: {metadata.selection_worlds}  ·  "
+            f"Fixed benchmark worlds: {metadata.benchmark_worlds}  ·  "
+            f"Benchmark every: {metadata.benchmark_interval} generations"
+            if metadata.selection_worlds is not None
+            else f"Training / validation worlds: {metadata.training_worlds} / "
+            f"{metadata.validation_worlds}"
+        )
         self.resume_metadata_label.setText(
+            f"Protocol (locked): {metadata.evolution_id}\n"
             f"Evolution run ID: {metadata.run_id}\n"
             f"Result directory: {metadata.result_directory}\n"
             f"Generations already completed: {metadata.completed_generations}\n"
@@ -1036,9 +1255,8 @@ class EvolutionWidget(QWidget):
             f"Population size: {metadata.population_size}  ·  "
             f"Elite count: {metadata.elite_count}  ·  "
             f"Parent pool: {metadata.parent_pool_size}\n"
-            f"Mutation sigma: {metadata.mutation_sigma:g}  ·  "
-            f"Training / validation worlds: {metadata.training_worlds} / "
-            f"{metadata.validation_worlds}\n"
+            f"Mutation sigma: {metadata.mutation_sigma:g}\n"
+            f"{worlds_line}\n"
             f"Noralets / world: {metadata.noralets_per_world}  ·  "
             f"Max ticks: {metadata.maximum_ticks}  ·  "
             f"Initial Energy: {metadata.initial_energy:g} eU\n"
@@ -1073,6 +1291,7 @@ class EvolutionWidget(QWidget):
         self.resume_metadata = None
         self.resume_group.setVisible(False)
         self.setup_group.setEnabled(True)
+        self._protocol_changed()
         self.progress_label.setText("Ready")
         self._refresh_result_actions()
 
@@ -1091,18 +1310,54 @@ class EvolutionWidget(QWidget):
             initial_energy=self.initial_energy_spin.value(),
         )
 
+    def current_distributional_setup(self) -> DistributionalEvolutionLaunchSetup:
+        return DistributionalEvolutionLaunchSetup(
+            generations=self.generations_spin.value(),
+            device=str(self.device_combo.currentData()),
+            population_size=self.population_spin.value(),
+            elite_count=self.elite_spin.value(),
+            parent_pool_size=self.parent_pool_spin.value(),
+            mutation_sigma=self.mutation_sigma_spin.value(),
+            selection_worlds=self.training_worlds_spin.value(),
+            benchmark_worlds=self.validation_worlds_spin.value(),
+            benchmark_interval=self.benchmark_interval_spin.value(),
+            noralets_per_world=self.noralets_per_world_spin.value(),
+            maximum_ticks=self.evolution_maximum_ticks_spin.value(),
+            initial_energy=self.initial_energy_spin.value(),
+            fork_from=(
+                None
+                if self.fork_metadata is None
+                else self.fork_metadata.checkpoint_path
+            ),
+        )
+
     def start_evolution(
         self,
-        setup: EvolutionLaunchSetup | None = None,
+        setup: EvolutionLaunchSetup | DistributionalEvolutionLaunchSetup | None = None,
         *,
         show_errors: bool = True,
     ) -> bool:
         if self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning:
             return False
-        preset_label = self.preset_name if setup is None else "Custom"
         try:
-            selected = self.current_setup() if setup is None else setup
-            invocation = build_evolution_invocation(selected)
+            if setup is None:
+                is_v2 = str(self.protocol_combo.currentData()) == "v2"
+                selected = (
+                    self.current_distributional_setup()
+                    if is_v2
+                    else self.current_setup()
+                )
+            else:
+                selected = setup
+                is_v2 = isinstance(
+                    selected,
+                    DistributionalEvolutionLaunchSetup,
+                )
+            invocation = (
+                build_distributional_evolution_invocation(selected)
+                if is_v2
+                else build_evolution_invocation(selected)
+            )
         except Exception as error:
             self.progress_label.setText(f"Invalid setup: {error}")
             if show_errors:
@@ -1112,9 +1367,18 @@ class EvolutionWidget(QWidget):
         self.resume_group.setVisible(False)
         self.setup_group.setEnabled(True)
         self._run_mode = "fresh"
+        fork_status = (
+            " · forked from selected v1 final population"
+            if is_v2 and selected.fork_from is not None
+            else ""
+        )
         return self._start_process(
             invocation,
-            f"Starting {preset_label} Evolution Bootstrap v1…",
+            (
+                f"Starting Distributional Evolution v2{fork_status}…"
+                if is_v2
+                else f"Starting {self.preset_name} Evolution Bootstrap v1…"
+            ),
             clear_result=True,
         )
 
@@ -1221,6 +1485,13 @@ class EvolutionWidget(QWidget):
                 f"train {match.group('training')} · "
                 f"validation {match.group('validation')}"
             )
+        distributional = self._DISTRIBUTIONAL_GENERATION_PATTERN.search(line)
+        if distributional is not None:
+            self.progress_label.setText(
+                f"Generation {distributional.group('generation')} complete · "
+                f"selection {distributional.group('selection')} · benchmark "
+                f"{distributional.group('benchmark')}"
+            )
         if self._invocation is not None:
             result = evolution_directory_from_line(
                 line,
@@ -1251,6 +1522,7 @@ class EvolutionWidget(QWidget):
             and (self.result_directory / "evolution-state.pt").is_file()
         )
         self.run_button.setEnabled(not running and self.resume_metadata is None)
+        self.fork_button.setEnabled(not running and self.resume_metadata is None)
         self.resume_select_button.setEnabled(not running)
         self.continue_button.setEnabled(bool(checkpoint_exists) and not running)
         self.stop_button.setEnabled(running)

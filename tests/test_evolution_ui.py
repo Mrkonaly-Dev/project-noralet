@@ -15,13 +15,21 @@ from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QApplication
 
 from noralet.evolution import EvolutionConfig
+from noralet.evolution.distributional import (
+    DISTRIBUTIONAL_EVOLUTION_ID,
+    DistributionalEvolutionConfig,
+    run_distributional_evolution,
+)
 from noralet.evolution.engine import load_champion, run_evolution
 from noralet.ui.app import NoraletMainWindow
 from noralet.ui.evolution_launcher import (
+    DistributionalEvolutionLaunchSetup,
     EvolutionLaunchSetup,
+    build_distributional_evolution_invocation,
     build_evolution_invocation,
     build_evolution_resume_invocation,
     estimate_evolution_workload,
+    load_evolution_fork_metadata,
     load_evolution_resume_metadata,
 )
 
@@ -203,7 +211,41 @@ class EvolutionUiTests(unittest.TestCase):
             self.assertEqual(panel.preset_name, "Custom")
             self.assertIsNone(panel.process)
             self.assertIsNone(window.live.session)
-            self.assertIn("72", panel.workload_label.text())
+            self.assertIn("144", panel.workload_label.text())
+        finally:
+            window.close()
+
+    def test_distributional_v2_is_normal_cpu_protocol_with_exact_defaults(self) -> None:
+        window = NoraletMainWindow()
+        try:
+            panel = window.evolution
+            setup = panel.current_distributional_setup()
+            self.assertEqual(panel.protocol_combo.currentData(), "v2")
+            self.assertEqual(setup, DistributionalEvolutionLaunchSetup())
+            self.assertEqual(setup.device, "cpu")
+            self.assertIn("DISTRIBUTIONAL", panel.page_title.text())
+            self.assertIn(
+                "Selection worlds",
+                panel._advanced_label_widgets[panel.training_worlds_spin].text(),
+            )
+            arguments = build_distributional_evolution_invocation(setup).arguments
+            self.assertEqual(arguments[4], "distributional")
+            expected = {
+                "--generations": "20",
+                "--device": "cpu",
+                "--population-size": "8",
+                "--elite-count": "2",
+                "--parent-pool-size": "4",
+                "--mutation-sigma": "0.02",
+                "--selection-worlds": "4",
+                "--benchmark-worlds": "8",
+                "--benchmark-every": "5",
+                "--noralets-per-world": "4",
+                "--max-ticks": "1000",
+                "--initial-energy": "10.0",
+            }
+            for flag, value in expected.items():
+                self.assertEqual(arguments[arguments.index(flag) + 1], value)
         finally:
             window.close()
 
@@ -269,6 +311,152 @@ class EvolutionUiTests(unittest.TestCase):
                     str(expected_champion["candidate_id"]),
                 ):
                     self.assertIn(expected, shown)
+            finally:
+                window.close()
+
+    def test_v1_fork_ui_shows_lineage_and_builds_new_v2_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result = _create_resume_fixture(Path(temporary), "fork-source")
+            checkpoint = (result / "evolution-state.pt").resolve()
+            source_before = checkpoint.read_bytes()
+            metadata = load_evolution_fork_metadata(checkpoint)
+            self.assertEqual(metadata.source_run_id, result.name)
+            self.assertEqual(metadata.completed_generations, 1)
+            self.assertEqual(metadata.population_size, 2)
+
+            window = NoraletMainWindow()
+            try:
+                panel = window.evolution
+                panel.apply_preset("Standard")
+                self.assertEqual(panel.protocol_combo.currentData(), "v1")
+                self.assertTrue(
+                    panel.load_fork_checkpoint(checkpoint, show_errors=False)
+                )
+                self.assertEqual(panel.protocol_combo.currentData(), "v2")
+                self.assertEqual(panel.training_worlds_spin.value(), 4)
+                self.assertEqual(panel.validation_worlds_spin.value(), 8)
+                self.assertEqual(panel.benchmark_interval_spin.value(), 5)
+                self.assertFalse(panel.population_spin.isEnabled())
+                shown = panel.fork_metadata_label.text()
+                for expected in (
+                    "FORK V1 → V2",
+                    result.name,
+                    str(checkpoint),
+                    "Source completed generation: 1",
+                    "Copied final population: 2 genomes",
+                    "new generation 0",
+                ):
+                    self.assertIn(expected, shown)
+                invocation = build_distributional_evolution_invocation(
+                    panel.current_distributional_setup()
+                )
+                self.assertEqual(
+                    invocation.arguments[-2:],
+                    ("--fork-from", str(checkpoint)),
+                )
+                self.assertEqual(checkpoint.read_bytes(), source_before)
+            finally:
+                window.close()
+
+    def test_distributional_resume_is_protocol_aware_and_locked(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = run_distributional_evolution(
+                DistributionalEvolutionConfig(
+                    generation_count=1,
+                    device="cpu",
+                    population_size=2,
+                    elite_count=1,
+                    parent_pool_size=2,
+                    selection_world_count=2,
+                    benchmark_world_count=3,
+                    benchmark_interval=5,
+                    noralets_per_world=2,
+                    max_ticks=2,
+                    mutation_sigma=0.041,
+                    initial_body_energy=13.0,
+                    initial_seed=91,
+                    output_root=root,
+                ),
+                run_directory=root / "v2-resume-source",
+                progress=None,
+            )
+            checkpoint = (result / "evolution-state.pt").resolve()
+            metadata = load_evolution_resume_metadata(checkpoint)
+            self.assertEqual(metadata.evolution_id, DISTRIBUTIONAL_EVOLUTION_ID)
+            self.assertEqual(
+                (
+                    metadata.selection_worlds,
+                    metadata.benchmark_worlds,
+                    metadata.benchmark_interval,
+                    metadata.completed_generations,
+                ),
+                (2, 3, 5, 1),
+            )
+            invocation = build_evolution_resume_invocation(
+                metadata,
+                target_generation=3,
+            )
+            self.assertEqual(invocation.arguments[4], "distributional")
+            self.assertEqual(
+                invocation.arguments[-4:],
+                ("--generations", "3", "--resume", str(checkpoint)),
+            )
+            for prohibited in (
+                "--population-size",
+                "--selection-worlds",
+                "--benchmark-worlds",
+                "--benchmark-every",
+                "--mutation-sigma",
+                "--seed",
+            ):
+                self.assertNotIn(prohibited, invocation.arguments)
+
+            window = NoraletMainWindow()
+            try:
+                panel = window.evolution
+                self.assertTrue(
+                    panel.load_resume_checkpoint(checkpoint, show_errors=False)
+                )
+                shown = panel.resume_metadata_label.text()
+                self.assertIn(DISTRIBUTIONAL_EVOLUTION_ID, shown)
+                self.assertIn("Selection worlds / generation: 2", shown)
+                self.assertIn("Fixed benchmark worlds: 3", shown)
+                self.assertIn("Benchmark every: 5 generations", shown)
+                self.assertIn("Benchmark-best champion", shown)
+                panel.population_spin.setValue(99)
+                panel.continue_to_spin.setValue(2)
+                self.assertTrue(panel.start_resume(show_errors=False))
+                self.assertNotIn("--population-size", panel._invocation.arguments)
+                deadline = time.monotonic() + 45.0
+                while (
+                    panel.process is not None
+                    and panel.process.state() != QProcess.ProcessState.NotRunning
+                    and time.monotonic() < deadline
+                ):
+                    self.application.processEvents()
+                    time.sleep(0.01)
+                self.application.processEvents()
+                self.assertEqual(panel.process.exitCode(), 0, panel.output.toPlainText())
+                self.assertEqual(panel.resume_metadata.completed_generations, 2)
+                panel.watch_button.click()
+                self.application.processEvents()
+                self.assertIn(
+                    "BENCHMARK-BEST CHAMPION WATCH",
+                    window.live.setup_group.title(),
+                )
+                champion_metadata = load_champion(result)[1]
+                shown_watch = window.live.champion_metadata_label.text()
+                for expected in (
+                    str(champion_metadata["candidate_id"]),
+                    str(champion_metadata["generation"]),
+                    "Champion role: benchmark-best",
+                    "Benchmark mean lifetime",
+                    "Benchmark median lifetime",
+                    "fresh learned life",
+                    "Current simulation: seed 1",
+                ):
+                    self.assertIn(expected, shown_watch)
             finally:
                 window.close()
 

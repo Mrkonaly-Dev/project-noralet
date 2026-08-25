@@ -193,8 +193,11 @@ def load_champion(
     if resolved.is_dir():
         resolved = resolved / "champion" / "best.pt"
     payload = torch.load(resolved, map_location="cpu", weights_only=True)
-    if payload.get("evolution_id") != EVOLUTION_ID:
-        raise ValueError("checkpoint is not an Evolution Bootstrap v1 champion")
+    if payload.get("evolution_id") not in (
+        EVOLUTION_ID,
+        "002-basebrain-distributional-evolution",
+    ):
+        raise ValueError("checkpoint is not a supported evolution champion")
     genome = BaseBrainGenome.from_state(payload["genome"])
     metadata = {key: value for key, value in payload.items() if key != "genome"}
     metadata["checkpoint_path"] = str(resolved.resolve())

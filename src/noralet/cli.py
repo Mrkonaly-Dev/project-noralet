@@ -127,6 +127,34 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("research-results"),
         help="generated-result root (default: research-results)",
     )
+    audit = research_subparsers.add_parser(
+        "evolution-audit",
+        help="audit saved evolved genomes on unseen worlds and CPU/CUDA timing",
+    )
+    audit.add_argument(
+        "--evolution-result",
+        type=Path,
+        required=True,
+        help="completed Evolution Bootstrap v1 result directory",
+    )
+    audit.add_argument(
+        "--audit-seed",
+        type=int,
+        default=20_260_825,
+        help="deterministic audit seed (default: 20260825)",
+    )
+    audit.add_argument(
+        "--generalization-device",
+        choices=("cpu", "cuda", "auto"),
+        default="auto",
+        help="device for unseen-world evaluation (default: auto)",
+    )
+    audit.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("research-results"),
+        help="generated-result root (default: research-results)",
+    )
 
     evolution_parser = subparsers.add_parser(
         "evolution",
@@ -165,6 +193,37 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--seed", type=int, default=1)
     bootstrap.add_argument("--checkpoint-every", type=_positive_int, default=5)
 
+    distributional = evolution_subparsers.add_parser(
+        "distributional",
+        help="run Distributional Evolution v2",
+    )
+    distributional.add_argument("--generations", type=_positive_int, default=20)
+    distributional.add_argument(
+        "--device",
+        choices=("cpu", "cuda", "auto"),
+        default=None,
+        help="PyTorch device (new-run default: cpu; resume default: saved device)",
+    )
+    source = distributional.add_mutually_exclusive_group()
+    source.add_argument("--fork-from", type=Path, default=None)
+    source.add_argument("--resume", type=Path, default=None)
+    distributional.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("evolution-results"),
+    )
+    distributional.add_argument("--population-size", type=_positive_int, default=8)
+    distributional.add_argument("--elite-count", type=_positive_int, default=2)
+    distributional.add_argument("--parent-pool-size", type=_positive_int, default=4)
+    distributional.add_argument("--mutation-sigma", type=_positive_float, default=0.02)
+    distributional.add_argument("--selection-worlds", type=_positive_int, default=4)
+    distributional.add_argument("--benchmark-worlds", type=_positive_int, default=8)
+    distributional.add_argument("--benchmark-every", type=_positive_int, default=5)
+    distributional.add_argument("--noralets-per-world", type=_positive_int, default=4)
+    distributional.add_argument("--max-ticks", type=_positive_int, default=1_000)
+    distributional.add_argument("--initial-energy", type=_positive_float, default=10.0)
+    distributional.add_argument("--seed", type=int, default=1)
+
     return parser
 
 
@@ -192,36 +251,114 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_ui(["noralet"])
 
     if args.command == "research":
-        from noralet.research import (
-            BaselineExperimentConfig,
-            LearningCondition,
-            ResearchBatchExecutionError,
-            run_baseline_experiment,
-        )
-
-        if args.seeds < 2:
-            parser.error("--seeds must be at least 2 for this protocol")
-        config = BaselineExperimentConfig(
-            replicate_seeds=tuple(range(1, args.seeds + 1)),
-            max_ticks=args.max_ticks,
-            sample_every_ticks=args.sample_every,
-            initial_population=args.population,
-            device=args.device,
-            conditions=tuple(LearningCondition(value) for value in args.conditions),
-            output_root=args.output_root,
-        )
-        try:
-            result_directory = run_baseline_experiment(
-                config,
-                cli_arguments=effective_argv,
+        if args.research_experiment == "baseline-lifetime-adaptation":
+            from noralet.research import (
+                BaselineExperimentConfig,
+                LearningCondition,
+                ResearchBatchExecutionError,
+                run_baseline_experiment,
             )
-        except ResearchBatchExecutionError as error:
-            print(str(error), file=sys.stderr)
-            return 1
+
+            if args.seeds < 2:
+                parser.error("--seeds must be at least 2 for this protocol")
+            config = BaselineExperimentConfig(
+                replicate_seeds=tuple(range(1, args.seeds + 1)),
+                max_ticks=args.max_ticks,
+                sample_every_ticks=args.sample_every,
+                initial_population=args.population,
+                device=args.device,
+                conditions=tuple(
+                    LearningCondition(value) for value in args.conditions
+                ),
+                output_root=args.output_root,
+            )
+            try:
+                result_directory = run_baseline_experiment(
+                    config,
+                    cli_arguments=effective_argv,
+                )
+            except ResearchBatchExecutionError as error:
+                print(str(error), file=sys.stderr)
+                return 1
+        elif args.research_experiment == "evolution-audit":
+            from noralet.research.evolution_audit import (
+                EvolutionAuditConfig,
+                run_evolution_audit,
+            )
+
+            config = EvolutionAuditConfig(
+                evolution_result=args.evolution_result,
+                output_root=args.output_root,
+                audit_seed=args.audit_seed,
+                generalization_device=args.generalization_device,
+            )
+            try:
+                result_directory = run_evolution_audit(
+                    config,
+                    cli_arguments=effective_argv,
+                    progress=lambda line: print(line, flush=True),
+                )
+            except Exception as error:
+                print(
+                    f"Evolution audit failed: {type(error).__name__}: {error}",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
+            raise AssertionError(
+                f"Unhandled research experiment: {args.research_experiment}"
+            )
         print(f"Research outputs: {result_directory}")
         return 0
 
     if args.command == "evolution":
+        if args.evolution_protocol == "distributional":
+            from noralet.evolution.distributional import (
+                DistributionalEvolutionConfig,
+                resume_distributional_evolution,
+                run_distributional_evolution,
+            )
+
+            try:
+                if args.resume is not None:
+                    result_directory = resume_distributional_evolution(
+                        args.resume,
+                        generation_count=args.generations,
+                        device=args.device,
+                        cli_arguments=effective_argv,
+                    )
+                else:
+                    config = DistributionalEvolutionConfig(
+                        generation_count=args.generations,
+                        device="cpu" if args.device is None else args.device,
+                        population_size=args.population_size,
+                        elite_count=args.elite_count,
+                        parent_pool_size=args.parent_pool_size,
+                        mutation_sigma=args.mutation_sigma,
+                        selection_world_count=args.selection_worlds,
+                        benchmark_world_count=args.benchmark_worlds,
+                        benchmark_interval=args.benchmark_every,
+                        noralets_per_world=args.noralets_per_world,
+                        max_ticks=args.max_ticks,
+                        initial_body_energy=args.initial_energy,
+                        initial_seed=args.seed,
+                        output_root=args.output_root,
+                    )
+                    result_directory = run_distributional_evolution(
+                        config,
+                        fork_from=args.fork_from,
+                        cli_arguments=effective_argv,
+                    )
+            except Exception as error:
+                print(
+                    f"Distributional evolution failed: "
+                    f"{type(error).__name__}: {error}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"Evolution outputs: {result_directory}")
+            return 0
+
         from noralet.evolution import (
             EvolutionConfig,
             fixed_world_seeds,
