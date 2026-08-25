@@ -10,6 +10,33 @@ import sys
 from noralet.ui.research_launcher import ProcessInvocation
 
 
+PILOT_PRESET_VALUES = {
+    "generations": 5,
+    "population_size": 8,
+    "elite_count": 2,
+    "parent_pool_size": 4,
+    "training_worlds": 2,
+    "validation_worlds": 2,
+    "noralets_per_world": 4,
+    "maximum_ticks": 1_000,
+    "mutation_sigma": 0.02,
+    "initial_energy": 10.0,
+}
+
+STANDARD_PRESET_VALUES = {
+    "generations": 50,
+    "population_size": 32,
+    "elite_count": 4,
+    "parent_pool_size": 8,
+    "training_worlds": 4,
+    "validation_worlds": 4,
+    "noralets_per_world": 6,
+    "maximum_ticks": 2_000,
+    "mutation_sigma": 0.02,
+    "initial_energy": 10.0,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class EvolutionLaunchSetup:
     generations: int = 50
@@ -58,6 +85,35 @@ class EvolutionLaunchSetup:
             object.__setattr__(self, name, value)
         object.__setattr__(self, "device", device)
         object.__setattr__(self, "output_root", Path(self.output_root))
+
+
+@dataclass(frozen=True, slots=True)
+class EvolutionWorkloadEstimate:
+    training_lives_per_generation: int
+    validation_lives_per_generation: int
+    maximum_training_ticks_per_generation: int
+
+
+def estimate_evolution_workload(
+    setup: EvolutionLaunchSetup,
+) -> EvolutionWorkloadEstimate:
+    """Calculate observer-only maximum counts; never enter evolution logic."""
+
+    if not isinstance(setup, EvolutionLaunchSetup):
+        raise TypeError("setup must be an EvolutionLaunchSetup")
+    training_lives = (
+        setup.population_size
+        * setup.training_worlds
+        * setup.noralets_per_world
+    )
+    validation_lives = setup.validation_worlds * setup.noralets_per_world
+    return EvolutionWorkloadEstimate(
+        training_lives_per_generation=training_lives,
+        validation_lives_per_generation=validation_lives,
+        maximum_training_ticks_per_generation=(
+            training_lives * setup.maximum_ticks
+        ),
+    )
 
 
 def build_evolution_invocation(

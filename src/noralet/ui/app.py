@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -45,6 +46,8 @@ from noralet.ui.canvas import WorldCanvas
 from noralet.ui.inspector import NoraletInspector
 from noralet.ui.evolution_launcher import (
     EvolutionLaunchSetup,
+    PILOT_PRESET_VALUES,
+    STANDARD_PRESET_VALUES,
     build_evolution_invocation,
     evolution_directory_from_line,
 )
@@ -623,6 +626,7 @@ class EvolutionWidget(QWidget):
         self._output_buffer = ""
         self._cancel_requested = False
         self._invocation: ProcessInvocation | None = None
+        self._applying_preset = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
@@ -650,23 +654,169 @@ class EvolutionWidget(QWidget):
         group = QGroupBox("Evolution Bootstrap v1")
         layout = QVBoxLayout(group)
         form = QFormLayout()
-        self.generations_spin = _positive_spinbox(value=50, maximum=100_000)
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItems(("Pilot", "Standard", "Custom"))
+        self.generations_spin = _positive_spinbox(value=5, maximum=100_000)
         self.device_combo = QComboBox()
         self.device_combo.addItem("CUDA", "cuda")
         self.device_combo.addItem("CPU", "cpu")
         self.device_combo.addItem("Auto", "auto")
+        form.addRow("Preset", self.preset_combo)
         form.addRow("Generations", self.generations_spin)
         form.addRow("Device", self.device_combo)
         layout.addLayout(form)
-        defaults = QLabel(
-            "Population 32 · elites 4 · parent pool 8 · mutation σ 0.02\n"
-            "4 training + 4 validation worlds · 6 Noralets/world · "
-            "2,000 ticks · birth Energy 10 eU\n"
-            "Fitness: mean observed lifetime (external viability proxy)"
+
+        self.preset_description = QLabel()
+        self.preset_description.setObjectName("sectionTitle")
+        layout.addWidget(self.preset_description)
+
+        self.advanced_button = QPushButton("Advanced settings ▸")
+        self.advanced_button.setCheckable(True)
+        layout.addWidget(self.advanced_button)
+        self.advanced_panel = QWidget()
+        advanced = QGridLayout(self.advanced_panel)
+        advanced.setContentsMargins(0, 2, 0, 2)
+        self.population_spin = _positive_spinbox(value=8, maximum=100_000)
+        self.elite_spin = _positive_spinbox(value=2, maximum=100_000)
+        self.parent_pool_spin = _positive_spinbox(value=4, maximum=100_000)
+        self.training_worlds_spin = _positive_spinbox(value=2, maximum=100_000)
+        self.validation_worlds_spin = _positive_spinbox(value=2, maximum=100_000)
+        self.noralets_per_world_spin = _positive_spinbox(value=4, maximum=100_000)
+        self.evolution_maximum_ticks_spin = _positive_spinbox(
+            value=1_000,
+            maximum=10_000_000,
         )
-        defaults.setWordWrap(True)
-        layout.addWidget(defaults)
+        self.mutation_sigma_spin = QDoubleSpinBox()
+        self.mutation_sigma_spin.setRange(0.0, 100.0)
+        self.mutation_sigma_spin.setDecimals(6)
+        self.mutation_sigma_spin.setSingleStep(0.005)
+        self.mutation_sigma_spin.setValue(0.02)
+        self.initial_energy_spin = QDoubleSpinBox()
+        self.initial_energy_spin.setRange(0.001, 100.0)
+        self.initial_energy_spin.setDecimals(3)
+        self.initial_energy_spin.setSingleStep(1.0)
+        self.initial_energy_spin.setSuffix(" eU")
+        self.initial_energy_spin.setValue(10.0)
+        advanced_fields = (
+            ("Population size", self.population_spin),
+            ("Elite count", self.elite_spin),
+            ("Parent pool size", self.parent_pool_spin),
+            ("Training worlds", self.training_worlds_spin),
+            ("Validation worlds", self.validation_worlds_spin),
+            ("Noralets / world", self.noralets_per_world_spin),
+            ("Maximum ticks", self.evolution_maximum_ticks_spin),
+            ("Mutation sigma", self.mutation_sigma_spin),
+            ("Initial Energy", self.initial_energy_spin),
+        )
+        for index, (label, widget) in enumerate(advanced_fields):
+            row, pair = divmod(index, 3)
+            column = pair * 2
+            advanced.addWidget(QLabel(label), row, column)
+            advanced.addWidget(widget, row, column + 1)
+        layout.addWidget(self.advanced_panel)
+        self.advanced_panel.setVisible(False)
+
+        self.workload_label = QLabel()
+        self.workload_label.setWordWrap(True)
+        layout.addWidget(self.workload_label)
+        fitness = QLabel(
+            "Fitness: mean observed lifetime · external viability proxy"
+        )
+        fitness.setWordWrap(True)
+        layout.addWidget(fitness)
+
+        self.advanced_button.toggled.connect(self._toggle_advanced)
+        self.preset_combo.currentTextChanged.connect(self.apply_preset)
+        for widget in self._preset_controlled_fields():
+            widget.valueChanged.connect(self._scientific_field_edited)
+        self.apply_preset("Pilot")
         return group
+
+    def _preset_controlled_fields(self) -> tuple[QSpinBox | QDoubleSpinBox, ...]:
+        return (
+            self.generations_spin,
+            self.population_spin,
+            self.elite_spin,
+            self.parent_pool_spin,
+            self.training_worlds_spin,
+            self.validation_worlds_spin,
+            self.noralets_per_world_spin,
+            self.evolution_maximum_ticks_spin,
+            self.mutation_sigma_spin,
+            self.initial_energy_spin,
+        )
+
+    @property
+    def preset_name(self) -> str:
+        return self.preset_combo.currentText()
+
+    def apply_preset(self, name: str) -> None:
+        if name not in ("Pilot", "Standard", "Custom"):
+            raise ValueError(f"unknown evolution preset: {name}")
+        if name == "Custom":
+            self.preset_description.setText("Custom — user-controlled protocol")
+            self._update_workload_estimate()
+            return
+        values = (
+            PILOT_PRESET_VALUES
+            if name == "Pilot"
+            else STANDARD_PRESET_VALUES
+        )
+        self._applying_preset = True
+        try:
+            blocked = self.preset_combo.blockSignals(True)
+            self.preset_combo.setCurrentText(name)
+            self.preset_combo.blockSignals(blocked)
+            self.generations_spin.setValue(values["generations"])
+            self.population_spin.setValue(values["population_size"])
+            self.elite_spin.setValue(values["elite_count"])
+            self.parent_pool_spin.setValue(values["parent_pool_size"])
+            self.training_worlds_spin.setValue(values["training_worlds"])
+            self.validation_worlds_spin.setValue(values["validation_worlds"])
+            self.noralets_per_world_spin.setValue(values["noralets_per_world"])
+            self.evolution_maximum_ticks_spin.setValue(values["maximum_ticks"])
+            self.mutation_sigma_spin.setValue(values["mutation_sigma"])
+            self.initial_energy_spin.setValue(values["initial_energy"])
+        finally:
+            self._applying_preset = False
+        self.preset_description.setText(
+            "Pilot — fast exploratory run"
+            if name == "Pilot"
+            else "Standard — full default protocol"
+        )
+        self._update_workload_estimate()
+
+    def _scientific_field_edited(self, value: object = None) -> None:
+        del value
+        if not self._applying_preset:
+            blocked = self.preset_combo.blockSignals(True)
+            self.preset_combo.setCurrentText("Custom")
+            self.preset_combo.blockSignals(blocked)
+            self.preset_description.setText("Custom — user-controlled protocol")
+        self._update_workload_estimate()
+
+    def _toggle_advanced(self, expanded: bool) -> None:
+        self.advanced_panel.setVisible(expanded)
+        self.advanced_button.setText(
+            "Advanced settings ▾" if expanded else "Advanced settings ▸"
+        )
+
+    def _update_workload_estimate(self) -> None:
+        training_lives = (
+            self.population_spin.value()
+            * self.training_worlds_spin.value()
+            * self.noralets_per_world_spin.value()
+        )
+        validation_lives = (
+            self.validation_worlds_spin.value()
+            * self.noralets_per_world_spin.value()
+        )
+        maximum_ticks = training_lives * self.evolution_maximum_ticks_spin.value()
+        self.workload_label.setText(
+            f"Training lives / generation: {training_lives:,}  ·  "
+            f"Champion validation lives / generation: {validation_lives:,}  ·  "
+            f"Maximum training ticks / generation: {maximum_ticks:,}"
+        )
 
     def _buttons(self) -> QHBoxLayout:
         layout = QHBoxLayout()
@@ -695,6 +845,15 @@ class EvolutionWidget(QWidget):
         return EvolutionLaunchSetup(
             generations=self.generations_spin.value(),
             device=str(self.device_combo.currentData()),
+            population_size=self.population_spin.value(),
+            elite_count=self.elite_spin.value(),
+            parent_pool_size=self.parent_pool_spin.value(),
+            mutation_sigma=self.mutation_sigma_spin.value(),
+            training_worlds=self.training_worlds_spin.value(),
+            validation_worlds=self.validation_worlds_spin.value(),
+            noralets_per_world=self.noralets_per_world_spin.value(),
+            maximum_ticks=self.evolution_maximum_ticks_spin.value(),
+            initial_energy=self.initial_energy_spin.value(),
         )
 
     def start_evolution(
@@ -705,6 +864,7 @@ class EvolutionWidget(QWidget):
     ) -> bool:
         if self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning:
             return False
+        preset_label = self.preset_name if setup is None else "Custom"
         try:
             selected = self.current_setup() if setup is None else setup
             invocation = build_evolution_invocation(selected)
@@ -730,7 +890,9 @@ class EvolutionWidget(QWidget):
         self.process = process
         self.run_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.progress_label.setText("Starting headless Evolution Bootstrap v1…")
+        self.progress_label.setText(
+            f"Starting {preset_label} Evolution Bootstrap v1…"
+        )
         process.start(invocation.program, list(invocation.arguments))
         return True
 

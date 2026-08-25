@@ -322,3 +322,72 @@ uncommitted. An unrelated deletion of
 neither was created, modified, or restored by this iteration.
 
 No commit or push was performed.
+
+## Post-implementation UI patch — Pilot presets (2026-08-25)
+
+The Evolution tab now opens with a clearly labelled `Pilot — fast exploratory
+run` preset. It populates:
+
+- generations `5`;
+- population `8`;
+- elites `2`;
+- parent pool `4`;
+- training worlds `2`;
+- validation worlds `2`;
+- Noralets per world `4`;
+- maximum ticks `1000`;
+- mutation sigma `0.02`;
+- initial Energy `10 eU`;
+- the user's currently selected device, without a preset-side device override.
+
+`Standard — full default protocol` restores the original Iteration 13 UI/CLI
+values: 50 generations, population 32, 4 elites, parent pool 8, four training
+and four validation worlds, six Noralets per world, 2,000 ticks, sigma 0.02, and
+10 eU. The headless CLI defaults were not changed.
+
+The compact Advanced settings section exposes population, elite count, parent
+pool size, training and validation world counts, Noralets/world, maximum ticks,
+mutation sigma, and initial Energy. Generations and device remain visible above
+it. Editing a preset-controlled scientific field switches the presentation to
+`Custom` without starting a process or changing any evolution state. Existing
+`EvolutionLaunchSetup` validation rejects invalid elite/parent/population
+relationships before `QProcess` launch and presents the error in the UI.
+
+An observer-only workload label calculates:
+
+```text
+Training lives / generation = population × training worlds × Noralets/world
+Champion validation lives / generation = validation worlds × Noralets/world
+Maximum training ticks / generation = training lives × max ticks
+```
+
+For Pilot this displays `64`, `8`, and `64,000`. These values are never passed
+to or consumed by the evolution engine.
+
+Focused preset/UI tests cover exact Pilot and Standard values, Custom CLI flag
+construction, invalid relationships, workload arithmetic, edit purity, the real
+Evolution `QProcess`, and Watch Champion. The Evolution-focused suite passed
+`20/20` in `11.192s`; the UI-only subset after the final validation-path test
+passed `7/7` in `5.633s`.
+
+The complete project suite after this patch passed:
+
+```text
+QT_QPA_PLATFORM=offscreen uv run python -m unittest discover -s tests -v
+Ran 446 tests in 26.798s
+OK
+```
+
+`uv run python -m compileall -q src tests`, `uv lock --check`, and
+`git diff --check` also passed. The exact `uv run noralet ui` entry point stayed
+active until intentionally terminated after launch verification. A tiny
+UI-configured CPU process exited successfully, exposed its partial/final result
+directory normally, and Watch Champion started and stepped a fresh life. The
+visually inspected preset screenshot is
+`evolution-results/ui-smoke/evolution-pilot-presets.png`.
+
+This patch changes no genome, initialization, evaluation, selection, fitness,
+validation, mutation, learning, world, checkpoint, resume, result-schema, Stop,
+or Watch Champion semantics. Validation used base commit
+`9b95ebf7afca05b7dceee16cf1341505f0479e41`. No commit or push was performed by
+this patch.
