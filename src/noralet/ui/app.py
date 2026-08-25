@@ -40,8 +40,14 @@ from PySide6.QtWidgets import (
 )
 
 from noralet.research.config import LearningCondition
+from noralet.evolution.watch import create_champion_live_session
 from noralet.ui.canvas import WorldCanvas
 from noralet.ui.inspector import NoraletInspector
+from noralet.ui.evolution_launcher import (
+    EvolutionLaunchSetup,
+    build_evolution_invocation,
+    evolution_directory_from_line,
+)
 from noralet.ui.research_launcher import (
     ProcessInvocation,
     ResearchLaunchSetup,
@@ -233,15 +239,24 @@ class LiveSimulationWidget(QWidget):
             if show_errors:
                 QMessageBox.critical(self, "Could not create run", str(error))
             return False
+        self.attach_session(
+            session,
+            f"Paused · {session.setup.condition.value} · "
+            f"{session.setup.device}",
+        )
+        return True
+
+    def attach_session(self, session: LiveSession, status: str) -> None:
+        """Attach a freshly constructed baseline or champion session."""
+
+        if not isinstance(session, LiveSession):
+            raise TypeError("session must be a LiveSession")
+        self.pause()
         self.session = session
         self.canvas.set_session(session)
-        self.status_label.setText(
-            f"Paused · {session.setup.condition.value} · "
-            f"{session.setup.device}"
-        )
+        self.status_label.setText(status)
         self.session_changed.emit(session)
         self._refresh_observer_widgets()
-        return True
 
     def start(self) -> None:
         if self.session is None and not self.reset_run():
@@ -588,8 +603,269 @@ class ResearchWidget(QWidget):
         self.process = None
 
 
+class EvolutionWidget(QWidget):
+    """QProcess launcher for the external Evolution Bootstrap v1 harness."""
+
+    watch_requested = Signal(object)
+    _GENERATION_PATTERN = re.compile(
+        r"Generation (?P<generation>\d+) complete: best training fitness "
+        r"(?P<training>[^;]+); validation (?P<validation>\S+)"
+    )
+    _CANDIDATE_PATTERN = re.compile(
+        r"Generation (?P<generation>\d+) candidate "
+        r"\[(?P<current>\d+)/(?P<total>\d+)\] (?P<candidate>\S+)"
+    )
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.process: QProcess | None = None
+        self.result_directory: Path | None = None
+        self._output_buffer = ""
+        self._cancel_requested = False
+        self._invocation: ProcessInvocation | None = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+        title = QLabel("001 · BASEBRAIN EVOLUTION BOOTSTRAP")
+        title.setObjectName("pageTitle")
+        root.addWidget(title)
+        root.addWidget(self._setup_group())
+        root.addLayout(self._buttons())
+        self.progress_label = QLabel("Ready")
+        self.progress_label.setObjectName("statusLabel")
+        root.addWidget(self.progress_label)
+        self.output = QPlainTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setMaximumBlockCount(2_000)
+        self.output.setPlaceholderText("Headless evolution progress appears here.")
+        root.addWidget(self.output, 1)
+        self.result_label = QLabel("Result directory: —")
+        self.result_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        root.addWidget(self.result_label)
+
+    def _setup_group(self) -> QGroupBox:
+        group = QGroupBox("Evolution Bootstrap v1")
+        layout = QVBoxLayout(group)
+        form = QFormLayout()
+        self.generations_spin = _positive_spinbox(value=50, maximum=100_000)
+        self.device_combo = QComboBox()
+        self.device_combo.addItem("CUDA", "cuda")
+        self.device_combo.addItem("CPU", "cpu")
+        self.device_combo.addItem("Auto", "auto")
+        form.addRow("Generations", self.generations_spin)
+        form.addRow("Device", self.device_combo)
+        layout.addLayout(form)
+        defaults = QLabel(
+            "Population 32 · elites 4 · parent pool 8 · mutation σ 0.02\n"
+            "4 training + 4 validation worlds · 6 Noralets/world · "
+            "2,000 ticks · birth Energy 10 eU\n"
+            "Fitness: mean observed lifetime (external viability proxy)"
+        )
+        defaults.setWordWrap(True)
+        layout.addWidget(defaults)
+        return group
+
+    def _buttons(self) -> QHBoxLayout:
+        layout = QHBoxLayout()
+        self.run_button = QPushButton("Start evolution")
+        self.stop_button = QPushButton("Stop")
+        self.watch_button = QPushButton("Watch Champion")
+        self.open_button = QPushButton("Open result folder")
+        self.stop_button.setEnabled(False)
+        self.watch_button.setEnabled(False)
+        self.open_button.setEnabled(False)
+        self.run_button.clicked.connect(lambda: self.start_evolution())
+        self.stop_button.clicked.connect(self.stop_evolution)
+        self.watch_button.clicked.connect(self._request_watch)
+        self.open_button.clicked.connect(self.open_result_folder)
+        for button in (
+            self.run_button,
+            self.stop_button,
+            self.watch_button,
+            self.open_button,
+        ):
+            layout.addWidget(button)
+        layout.addStretch(1)
+        return layout
+
+    def current_setup(self) -> EvolutionLaunchSetup:
+        return EvolutionLaunchSetup(
+            generations=self.generations_spin.value(),
+            device=str(self.device_combo.currentData()),
+        )
+
+    def start_evolution(
+        self,
+        setup: EvolutionLaunchSetup | None = None,
+        *,
+        show_errors: bool = True,
+    ) -> bool:
+        if self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning:
+            return False
+        try:
+            selected = self.current_setup() if setup is None else setup
+            invocation = build_evolution_invocation(selected)
+        except Exception as error:
+            self.progress_label.setText(f"Invalid setup: {error}")
+            if show_errors:
+                QMessageBox.warning(self, "Invalid evolution setup", str(error))
+            return False
+        self.output.clear()
+        self.result_directory = None
+        self.result_label.setText("Result directory: —")
+        self.open_button.setEnabled(False)
+        self.watch_button.setEnabled(False)
+        self._output_buffer = ""
+        self._cancel_requested = False
+        self._invocation = invocation
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.setWorkingDirectory(str(invocation.working_directory))
+        process.readyReadStandardOutput.connect(self._read_output)
+        process.finished.connect(self._process_finished)
+        process.errorOccurred.connect(self._process_error)
+        self.process = process
+        self.run_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.progress_label.setText("Starting headless Evolution Bootstrap v1…")
+        process.start(invocation.program, list(invocation.arguments))
+        return True
+
+    def stop_evolution(self) -> None:
+        if self.process is None or self.process.state() == QProcess.ProcessState.NotRunning:
+            return
+        self._cancel_requested = True
+        self.progress_label.setText("Cancellation requested…")
+        self.process.terminate()
+        QTimer.singleShot(1_500, self._kill_if_running)
+
+    def _kill_if_running(self) -> None:
+        if self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning:
+            self.process.kill()
+
+    def _read_output(self) -> None:
+        if self.process is None:
+            return
+        text = bytes(self.process.readAllStandardOutput()).decode(
+            "utf-8",
+            errors="replace",
+        )
+        if not text:
+            return
+        self.output.moveCursor(QTextCursor.MoveOperation.End)
+        self.output.insertPlainText(text)
+        self.output.ensureCursorVisible()
+        self._output_buffer += text
+        lines = self._output_buffer.splitlines(keepends=True)
+        self._output_buffer = ""
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            self._output_buffer = lines.pop()
+        for line in lines:
+            self._parse_output_line(line)
+
+    def _parse_output_line(self, line: str) -> None:
+        candidate_match = self._CANDIDATE_PATTERN.search(line)
+        if candidate_match is not None:
+            self.progress_label.setText(
+                f"Generation {candidate_match.group('generation')} · candidate "
+                f"{candidate_match.group('current')} / "
+                f"{candidate_match.group('total')} · "
+                f"{candidate_match.group('candidate')}"
+            )
+        match = self._GENERATION_PATTERN.search(line)
+        if match is not None:
+            self.progress_label.setText(
+                f"Generation {match.group('generation')} complete · "
+                f"train {match.group('training')} · "
+                f"validation {match.group('validation')}"
+            )
+        if self._invocation is not None:
+            result = evolution_directory_from_line(
+                line,
+                self._invocation.working_directory,
+            )
+            if result is not None:
+                self.result_directory = result
+                self.result_label.setText(f"Result directory: {result}")
+        if self.result_directory is not None:
+            self._refresh_result_actions()
+
+    def _refresh_result_actions(self) -> None:
+        available = (
+            self.result_directory is not None
+            and self.result_directory.is_dir()
+        )
+        self.open_button.setEnabled(available)
+        champion_exists = (
+            available
+            and (self.result_directory / "champion" / "best.pt").is_file()
+        )
+        self.watch_button.setEnabled(bool(champion_exists))
+
+    def _process_finished(
+        self,
+        exit_code: int,
+        exit_status: QProcess.ExitStatus,
+    ) -> None:
+        self._read_output()
+        if self._output_buffer:
+            self._parse_output_line(self._output_buffer)
+            self._output_buffer = ""
+        successful = (
+            exit_status == QProcess.ExitStatus.NormalExit
+            and exit_code == 0
+            and not self._cancel_requested
+        )
+        if successful:
+            self.progress_label.setText("Evolution completed successfully")
+        elif self._cancel_requested:
+            self.progress_label.setText("Evolution canceled · completed checkpoints retained")
+        else:
+            self.progress_label.setText(
+                f"Evolution process failed with exit code {exit_code}"
+            )
+        self._refresh_result_actions()
+        self.run_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+
+    def _process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.ProcessError.Crashed and self._cancel_requested:
+            return
+        if self.process is not None:
+            self.progress_label.setText(
+                f"Evolution process error: {self.process.errorString()}"
+            )
+        if error == QProcess.ProcessError.FailedToStart:
+            self.run_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+
+    def _request_watch(self) -> None:
+        if self.result_directory is not None:
+            self.watch_requested.emit(self.result_directory)
+
+    def open_result_folder(self) -> None:
+        if self.result_directory is None or not self.result_directory.is_dir():
+            QMessageBox.warning(self, "Result unavailable", "No result folder is available.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.result_directory)))
+
+    def shutdown(self) -> None:
+        if self.process is None:
+            return
+        if self.process.state() != QProcess.ProcessState.NotRunning:
+            self.process.terminate()
+            if not self.process.waitForFinished(1_500):
+                self.process.kill()
+                self.process.waitForFinished(1_000)
+        self.process.deleteLater()
+        self.process = None
+
+
 class NoraletMainWindow(QMainWindow):
-    """Single compact desktop shell for live observation and Research 001."""
+    """Desktop shell for live observation, research and external evolution."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -600,13 +876,47 @@ class NoraletMainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.live = LiveSimulationWidget()
         self.research = ResearchWidget()
+        self.evolution = EvolutionWidget()
         self.tabs.addTab(self.live, "Live Simulation")
         self.tabs.addTab(self.research, "Research")
+        self.tabs.addTab(self.evolution, "Evolution")
+        self.evolution.watch_requested.connect(self._watch_champion)
         self.setCentralWidget(self.tabs)
+
+    def _watch_champion(self, result_directory: object) -> None:
+        if not isinstance(result_directory, Path):
+            return
+        try:
+            live_setup = self.live.current_setup()
+            champion_setup = LiveRunSetup(
+                simulation_seed=live_setup.simulation_seed,
+                population=live_setup.population,
+                device=str(self.evolution.device_combo.currentData()),
+                maximum_ticks=live_setup.maximum_ticks,
+                condition=LearningCondition.FULL_CURRENT_BRAIN,
+            )
+            session, metadata = create_champion_live_session(
+                result_directory,
+                champion_setup,
+            )
+        except Exception as error:
+            QMessageBox.critical(self, "Could not watch champion", str(error))
+            return
+        self.live.condition_combo.setCurrentIndex(
+            self.live.condition_combo.findData(
+                LearningCondition.FULL_CURRENT_BRAIN.value
+            )
+        )
+        self.live.attach_session(
+            session,
+            f"Paused · champion {metadata['candidate_id']} · fresh learned life",
+        )
+        self.tabs.setCurrentWidget(self.live)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
         self.live.shutdown()
         self.research.shutdown()
+        self.evolution.shutdown()
         event.accept()
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import math
+from collections.abc import Mapping
 
 import torch
 from torch import Tensor
@@ -114,6 +115,43 @@ class BaseBrain:
             parameter.detach().cpu().clone()
             for parameter in self._prototype.parameters()
         )
+
+    def inherited_parameter_state(self) -> dict[str, Tensor]:
+        """Return named detached CPU copies of the complete inherited genome."""
+
+        return {
+            name: parameter.detach().cpu().clone()
+            for name, parameter in self._prototype.named_parameters()
+        }
+
+    def load_inherited_parameter_state(
+        self,
+        state: Mapping[str, Tensor],
+    ) -> None:
+        """Replace the prototype genome while preserving its fixed architecture."""
+
+        if not isinstance(state, Mapping):
+            raise TypeError("state must be a parameter mapping")
+        parameters = dict(self._prototype.named_parameters())
+        if set(state) != set(parameters):
+            missing = sorted(set(parameters) - set(state))
+            unexpected = sorted(set(state) - set(parameters))
+            raise ValueError(
+                "inherited parameter names do not match the BaseBrain: "
+                f"missing={missing}, unexpected={unexpected}"
+            )
+        with torch.no_grad():
+            for name, parameter in parameters.items():
+                value = state[name]
+                if not isinstance(value, Tensor):
+                    raise TypeError(f"inherited parameter {name!r} must be a Tensor")
+                if value.shape != parameter.shape or value.dtype != parameter.dtype:
+                    raise ValueError(
+                        f"inherited parameter {name!r} shape/dtype does not match"
+                    )
+                if not torch.isfinite(value).all().item():
+                    raise ValueError(f"inherited parameter {name!r} must be finite")
+                parameter.copy_(value.to(device=parameter.device))
 
     def spawn(self, *, action_random_source: object | None = None) -> NoraletBrain:
         """Clone an independent model and zero hidden state on the target device."""

@@ -24,6 +24,13 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0.0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
 _RESEARCH_CONDITIONS = (
     "no-learning",
     "predictive-only",
@@ -121,6 +128,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="generated-result root (default: research-results)",
     )
 
+    evolution_parser = subparsers.add_parser(
+        "evolution",
+        help="evolve inherited BaseBrain initializations",
+    )
+    evolution_subparsers = evolution_parser.add_subparsers(
+        dest="evolution_protocol",
+        required=True,
+    )
+    bootstrap = evolution_subparsers.add_parser(
+        "basebrain-bootstrap",
+        help="run mutation-only Evolution Bootstrap v1",
+    )
+    bootstrap.add_argument("--generations", type=_positive_int, default=50)
+    bootstrap.add_argument(
+        "--device",
+        choices=("cpu", "cuda", "auto"),
+        default=None,
+        help="PyTorch device (new-run default: cuda; resume default: saved device)",
+    )
+    bootstrap.add_argument("--resume", type=Path, default=None)
+    bootstrap.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("evolution-results"),
+    )
+    bootstrap.add_argument("--population-size", type=_positive_int, default=32)
+    bootstrap.add_argument("--elite-count", type=_positive_int, default=None)
+    bootstrap.add_argument("--parent-pool-size", type=_positive_int, default=None)
+    bootstrap.add_argument("--mutation-sigma", type=_positive_float, default=0.02)
+    bootstrap.add_argument("--training-worlds", type=_positive_int, default=4)
+    bootstrap.add_argument("--validation-worlds", type=_positive_int, default=4)
+    bootstrap.add_argument("--noralets-per-world", type=_positive_int, default=6)
+    bootstrap.add_argument("--max-ticks", type=_positive_int, default=2_000)
+    bootstrap.add_argument("--initial-energy", type=_positive_float, default=10.0)
+    bootstrap.add_argument("--seed", type=int, default=1)
+    bootstrap.add_argument("--checkpoint-every", type=_positive_int, default=5)
+
     return parser
 
 
@@ -175,6 +219,65 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(str(error), file=sys.stderr)
             return 1
         print(f"Research outputs: {result_directory}")
+        return 0
+
+    if args.command == "evolution":
+        from noralet.evolution import (
+            EvolutionConfig,
+            fixed_world_seeds,
+            resume_evolution,
+            run_evolution,
+        )
+
+        try:
+            if args.resume is not None:
+                result_directory = resume_evolution(
+                    args.resume,
+                    generation_count=args.generations,
+                    device=args.device,
+                    cli_arguments=effective_argv,
+                )
+            else:
+                elite_count = (
+                    min(4, max(1, args.population_size - 1))
+                    if args.elite_count is None
+                    else args.elite_count
+                )
+                parent_pool_size = (
+                    min(8, args.population_size)
+                    if args.parent_pool_size is None
+                    else args.parent_pool_size
+                )
+                config = EvolutionConfig(
+                    generation_count=args.generations,
+                    device="cuda" if args.device is None else args.device,
+                    population_size=args.population_size,
+                    elite_count=elite_count,
+                    parent_pool_size=parent_pool_size,
+                    mutation_sigma=args.mutation_sigma,
+                    training_world_seeds=fixed_world_seeds(
+                        "training",
+                        args.training_worlds,
+                    ),
+                    validation_world_seeds=fixed_world_seeds(
+                        "validation",
+                        args.validation_worlds,
+                    ),
+                    noralets_per_world=args.noralets_per_world,
+                    max_ticks=args.max_ticks,
+                    initial_body_energy=args.initial_energy,
+                    initial_seed=args.seed,
+                    champion_checkpoint_interval=args.checkpoint_every,
+                    output_root=args.output_root,
+                )
+                result_directory = run_evolution(
+                    config,
+                    cli_arguments=effective_argv,
+                )
+        except Exception as error:
+            print(f"Evolution failed: {type(error).__name__}: {error}", file=sys.stderr)
+            return 1
+        print(f"Evolution outputs: {result_directory}")
         return 0
 
     raise AssertionError(f"Unhandled command: {args.command}")

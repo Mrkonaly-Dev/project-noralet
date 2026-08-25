@@ -16,6 +16,7 @@ from noralet.research.config import (
     seed_mapping,
 )
 from noralet.simulation.events import NoraletAccelerated
+from noralet.evolution.genome import BaseBrainGenome
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +137,12 @@ class LiveSession:
         return tuple(results)
 
 
-def create_live_session(setup: LiveRunSetup) -> LiveSession:
+def create_live_session(
+    setup: LiveRunSetup,
+    *,
+    inherited_genome: BaseBrainGenome | None = None,
+    initial_body_energy: float = 60.0,
+) -> LiveSession:
     """Create a fresh UI-owned runner from the shared baseline factory."""
 
     if not isinstance(setup, LiveRunSetup):
@@ -147,7 +153,12 @@ def create_live_session(setup: LiveRunSetup) -> LiveSession:
         condition=setup.condition,
         simulation_seed=setup.simulation_seed,
         base_brain_seed=setup.base_brain_seed,
+        initial_body_energy=initial_body_energy,
     )
+    if inherited_genome is not None:
+        if not isinstance(inherited_genome, BaseBrainGenome):
+            raise TypeError("inherited_genome must be a BaseBrainGenome")
+        inherited_genome.apply_to(base_brain)
     return LiveSession(
         setup,
         AutonomousSimulationRunner(simulation, base_brain),

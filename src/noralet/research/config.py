@@ -321,9 +321,21 @@ def _brain_config(base_brain_seed: int, device: str) -> NoraletBrainConfig:
     )
 
 
-def initial_bodies(population: int) -> tuple[NoraletBodyState, ...]:
+def initial_bodies(
+    population: int,
+    *,
+    stored_energy: float = 60.0,
+) -> tuple[NoraletBodyState, ...]:
     if type(population) is not int or population <= 0:
         raise ValueError("population must be a positive integer")
+    if isinstance(stored_energy, bool) or not isinstance(
+        stored_energy,
+        (int, float),
+    ):
+        raise TypeError("stored_energy must be a real number")
+    stored_energy = float(stored_energy)
+    if not math.isfinite(stored_energy) or not 0.0 < stored_energy <= 100.0:
+        raise ValueError("stored_energy must be finite and in (0, 100]")
     if population == 1:
         positions = (0.0,)
     else:
@@ -336,7 +348,7 @@ def initial_bodies(population: int) -> tuple[NoraletBodyState, ...]:
             noralet_id=index + 1,
             position=position,
             velocity=0.0,
-            energy=60.0,
+            energy=stored_energy,
             age_ticks=0,
             condition=1.0,
             perceptual_signature=(
@@ -384,6 +396,7 @@ def build_baseline_components(
     condition: LearningCondition,
     simulation_seed: int,
     base_brain_seed: int,
+    initial_body_energy: float = 60.0,
 ) -> tuple[Simulation, BaseBrain]:
     """Build one baseline world/brain pair for research or observer tooling."""
 
@@ -417,7 +430,10 @@ def build_baseline_components(
             noralet_signals=signals,
             noralet_actuators=actuator,
         ),
-        initial_bodies=initial_bodies(initial_population),
+        initial_bodies=initial_bodies(
+            initial_population,
+            stored_energy=initial_body_energy,
+        ),
         initial_energy_points=initial_energy_points(),
     )
     base_brain = BaseBrain(
@@ -456,6 +472,7 @@ def baseline_configuration_manifest(
     population: int,
     device: str,
     seeds: SeedMapping,
+    initial_body_energy: float = 60.0,
 ) -> dict[str, Any]:
     """Serialize every fixed numerical choice in the baseline protocol."""
 
@@ -472,7 +489,10 @@ def baseline_configuration_manifest(
             "brain": _brain_config(seeds.base_brain_seed, device),
             "predictive_learning": predictive_learning_config(),
             "homeostatic_plasticity": homeostatic_plasticity_config(),
-            "initial_bodies": initial_bodies(population),
+            "initial_bodies": initial_bodies(
+                population,
+                stored_energy=initial_body_energy,
+            ),
             "initial_energy_points": initial_energy_points(),
         }
     )
