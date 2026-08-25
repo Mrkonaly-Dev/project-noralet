@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+import json
 from pathlib import Path
 import sys
 
@@ -155,6 +156,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("research-results"),
         help="generated-result root (default: research-results)",
     )
+    initialization_audit = research_subparsers.add_parser(
+        "basebrain-initialization-audit",
+        help="audit neutral action priors of fresh BaseBrains without worlds",
+    )
+    initialization_audit.add_argument(
+        "--samples",
+        type=_positive_int,
+        default=100,
+        help="number of independently initialized BaseBrains (default: 100)",
+    )
+    initialization_audit.add_argument(
+        "--seed",
+        type=int,
+        default=1,
+        help="deterministic audit seed (default: 1)",
+    )
+    initialization_audit.add_argument(
+        "--device",
+        choices=("cpu", "cuda", "auto"),
+        default="cpu",
+        help="activation device (default: cpu)",
+    )
 
     evolution_parser = subparsers.add_parser(
         "evolution",
@@ -251,6 +274,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_ui(["noralet"])
 
     if args.command == "research":
+        if args.research_experiment == "basebrain-initialization-audit":
+            from noralet.research.initialization_audit import (
+                run_initialization_audit,
+            )
+
+            result = run_initialization_audit(
+                sample_count=args.samples,
+                audit_seed=args.seed,
+                device=args.device,
+            )
+            print(json.dumps(result.state(), indent=2, sort_keys=True))
+            return 0
         if args.research_experiment == "baseline-lifetime-adaptation":
             from noralet.research import (
                 BaselineExperimentConfig,

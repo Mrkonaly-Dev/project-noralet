@@ -121,6 +121,29 @@ A newly created Noralet should not automatically know:
 
 The BaseBrain provides **capacity**, not a completed worldview.
 
+Minimal priors do not mean arbitrary random actuator bias. Noralet brains may
+contain minimal inherited neural or physiological priors needed for stable
+operation, but they must not contain environment-specific survival knowledge.
+
+Allowed neutral priors include:
+
+* a stable zero initial recurrent state;
+* a balanced stochastic motor baseline;
+* normally inactive optional consume and signal actuators;
+* well-scaled deterministic neural initialization.
+
+Forbidden environmental priors include rules or initialized knowledge that say:
+
+* avoid a boundary;
+* seek Energy or move toward the world center;
+* follow or avoid another Noralet;
+* signal when distressed;
+* consume when food is visible.
+
+Neutral initialization constrains only the newborn operating point. Experience,
+lifetime plasticity and evolution remain free to move every action policy away
+from it.
+
 ---
 
 ## 4. Continuous Neural Existence

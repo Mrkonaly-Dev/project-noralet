@@ -17,8 +17,10 @@ import torch
 from noralet.evolution.config import EVOLUTION_ID, derived_seed
 from noralet.evolution.engine import (
     _deserialize_candidate,
+    _fresh_population_initialization,
     _provenance,
     _save_checkpoint,
+    _saved_population_initialization,
     _serialize_candidate,
     _write_csv,
 )
@@ -473,6 +475,9 @@ def _fork_population(
         "source_checkpoint_sha256": _file_sha256(resolved),
         "source_completed_generation": int(state["next_generation"]),
         "source_candidate_identities": identities,
+        "source_population_initialization": _saved_population_initialization(
+            state
+        ),
         "v2_start_generation": 0,
     }
 
@@ -483,6 +488,7 @@ def _champion_payload(
     benchmark_seeds: tuple[int, ...],
     row: dict[str, Any],
     champion_kind: str,
+    population_initialization: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "evolution_id": DISTRIBUTIONAL_EVOLUTION_ID,
@@ -504,6 +510,7 @@ def _champion_payload(
         "configuration": config.state(),
         "learning_mode": LearningCondition.FULL_CURRENT_BRAIN.value,
         "initial_body_energy": config.initial_body_energy,
+        "population_initialization": population_initialization,
     }
 
 
@@ -515,6 +522,7 @@ def _save_distributional_champion(
     row: dict[str, Any],
     *,
     champion_kind: str,
+    population_initialization: dict[str, Any],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -524,6 +532,7 @@ def _save_distributional_champion(
             benchmark_seeds,
             row,
             champion_kind,
+            population_initialization,
         ),
         path,
     )
@@ -670,6 +679,7 @@ def _checkpoint_state(
     current_selection_champion: dict[str, Any] | None,
     benchmark_seeds: tuple[int, ...],
     fork_provenance: dict[str, Any] | None,
+    population_initialization: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "evolution_id": DISTRIBUTIONAL_EVOLUTION_ID,
@@ -685,6 +695,7 @@ def _checkpoint_state(
         "current_selection_champion": current_selection_champion,
         "benchmark_world_seeds": list(benchmark_seeds),
         "fork_provenance": fork_provenance,
+        "population_initialization": population_initialization,
         "rng_state": {
             "scheme": "stateless SHA-256 domain-separated seeds",
             "initial_seed": config.initial_seed,
@@ -700,6 +711,7 @@ def _manifest(
     benchmark_seeds: tuple[int, ...],
     fork_provenance: dict[str, Any] | None,
     cli_arguments: Sequence[str] | None,
+    population_initialization: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "evolution_id": DISTRIBUTIONAL_EVOLUTION_ID,
@@ -715,6 +727,7 @@ def _manifest(
         **config.scientific_configuration(),
         "fixed_benchmark_world_seeds": list(benchmark_seeds),
         "fork_provenance": fork_provenance,
+        "population_initialization": population_initialization,
         "seed_derivation": {
             "algorithm": "SHA-256",
             "domain": _SEED_DOMAIN.rstrip(b"\0").decode("utf-8"),
@@ -773,6 +786,7 @@ def _run_loop(
     current_selection_champion: dict[str, Any] | None,
     benchmark_seeds: tuple[int, ...],
     fork_provenance: dict[str, Any] | None,
+    population_initialization: dict[str, Any],
     progress: Callable[[str], None] | None,
 ) -> Path:
     if next_generation > config.generation_count:
@@ -875,6 +889,7 @@ def _run_loop(
                 benchmark_seeds,
                 benchmark_row,
                 champion_kind="benchmark-evaluated-selection-champion",
+                population_initialization=population_initialization,
             )
             assert benchmark_best_state is not None
             best_candidate = _deserialize_candidate(
@@ -887,6 +902,7 @@ def _run_loop(
                 benchmark_seeds,
                 benchmark_best_state["row"],
                 champion_kind="benchmark-best",
+                population_initialization=population_initialization,
             )
 
         fitnesses = tuple(value.fitness for value in evaluations)
@@ -941,6 +957,7 @@ def _run_loop(
             current_selection_champion=current_selection_champion,
             benchmark_seeds=benchmark_seeds,
             fork_provenance=fork_provenance,
+            population_initialization=population_initialization,
         )
         _save_checkpoint(destination / "evolution-state.pt", state)
         _write_outputs(
@@ -996,8 +1013,16 @@ def run_distributional_evolution(
     if fork_from is None:
         population = initialize_distributional_population(config)
         fork_provenance = None
+        population_initialization = _fresh_population_initialization()
     else:
         population, fork_provenance = _fork_population(fork_from, config)
+        population_initialization = {
+            "population_origin": "forked-explicit-genomes",
+            "source_population_initialization": fork_provenance[
+                "source_population_initialization"
+            ],
+            "explicit_genome_parameters_override_initializer": True,
+        }
     benchmark_seeds = fixed_benchmark_world_seeds(config)
     destination = (
         Path(run_directory)
@@ -1014,6 +1039,7 @@ def run_distributional_evolution(
         benchmark_seeds,
         fork_provenance,
         cli_arguments,
+        population_initialization,
     )
     (destination / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True),
@@ -1033,6 +1059,7 @@ def run_distributional_evolution(
         current_selection_champion=None,
         benchmark_seeds=benchmark_seeds,
         fork_provenance=fork_provenance,
+        population_initialization=population_initialization,
         progress=progress,
     )
 
@@ -1060,6 +1087,7 @@ def resume_distributional_evolution(
     benchmark_rows = list(state["benchmark_rows"])
     benchmark_history = list(state["benchmark_history"])
     benchmark_best_state = state["benchmark_best_state"]
+    population_initialization = _saved_population_initialization(state)
     prior_final = next_generation - 1
     if prior_final % config.benchmark_interval != 0:
         benchmark_rows = [
@@ -1101,6 +1129,7 @@ def resume_distributional_evolution(
                 tuple(state["benchmark_world_seeds"]),
                 benchmark_best_state["row"],
                 champion_kind="benchmark-best",
+                population_initialization=population_initialization,
             )
     manifest = json.loads((destination / "manifest.json").read_text("utf-8"))
     manifest.setdefault("resume_history", []).append(
@@ -1118,6 +1147,7 @@ def resume_distributional_evolution(
     manifest["completed_at_utc"] = None
     manifest["device"] = config.device
     manifest["full_evolution_configuration"] = config.state()
+    manifest.setdefault("population_initialization", population_initialization)
     return _run_loop(
         destination=destination,
         config=config,
@@ -1134,5 +1164,6 @@ def resume_distributional_evolution(
         current_selection_champion=state["current_selection_champion"],
         benchmark_seeds=tuple(state["benchmark_world_seeds"]),
         fork_provenance=state["fork_provenance"],
+        population_initialization=population_initialization,
         progress=progress,
     )

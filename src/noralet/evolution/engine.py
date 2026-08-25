@@ -16,6 +16,7 @@ from typing import Any
 
 import torch
 
+from noralet.brain.config import base_brain_initialization_manifest
 from noralet.evolution.config import (
     EVOLUTION_ID,
     EVOLUTION_SCHEMA_VERSION,
@@ -65,6 +66,27 @@ CANDIDATE_COLUMNS = (
     "total_individuals_evaluated",
     "mean_consumed_energy",
 )
+
+
+def _fresh_population_initialization() -> dict[str, Any]:
+    return {
+        "population_origin": "fresh-random-basebrains",
+        "base_brain_initialization": base_brain_initialization_manifest(),
+        "explicit_genome_parameters_override_initializer": False,
+    }
+
+
+def _saved_population_initialization(state: dict[str, Any]) -> dict[str, Any]:
+    recorded = state.get("population_initialization")
+    if isinstance(recorded, dict):
+        return dict(recorded)
+    return {
+        "population_origin": "historical-explicit-genomes",
+        "base_brain_initialization": {
+            "version": "legacy-unrecorded-random-initialization"
+        },
+        "explicit_genome_parameters_override_initializer": True,
+    }
 
 
 def _git_value(*arguments: str) -> str | None:
@@ -147,6 +169,7 @@ def _champion_payload(
     training_fitness: float,
     validation_fitness: float,
     config: EvolutionConfig,
+    population_initialization: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "evolution_id": EVOLUTION_ID,
@@ -159,6 +182,7 @@ def _champion_payload(
         "configuration": config.state(),
         "learning_mode": "full-current-brain",
         "initial_body_energy": config.initial_body_energy,
+        "population_initialization": population_initialization,
     }
 
 
@@ -170,6 +194,7 @@ def save_champion(
     training_fitness: float,
     validation_fitness: float,
     config: EvolutionConfig,
+    population_initialization: dict[str, Any] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -179,6 +204,11 @@ def save_champion(
             training_fitness=training_fitness,
             validation_fitness=validation_fitness,
             config=config,
+            population_initialization=(
+                _fresh_population_initialization()
+                if population_initialization is None
+                else population_initialization
+            ),
         ),
         path,
     )
@@ -285,6 +315,7 @@ def _checkpoint_state(
     generation_rows: list[dict[str, Any]],
     candidate_rows: list[dict[str, Any]],
     best_state: dict[str, Any] | None,
+    population_initialization: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "evolution_id": EVOLUTION_ID,
@@ -295,6 +326,7 @@ def _checkpoint_state(
         "generation_rows": generation_rows,
         "candidate_rows": candidate_rows,
         "best_state": best_state,
+        "population_initialization": population_initialization,
         "rng_state": {
             "scheme": "stateless SHA-256 domain-separated seeds",
             "initial_seed": config.initial_seed,
@@ -326,6 +358,7 @@ def _initial_manifest(
     destination: Path,
     created_at: datetime,
     cli_arguments: Sequence[str] | None,
+    population_initialization: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "evolution_id": EVOLUTION_ID,
@@ -337,6 +370,7 @@ def _initial_manifest(
         "result_directory": str(destination),
         "cli_arguments": list(cli_arguments) if cli_arguments is not None else None,
         "full_evolution_configuration": config.state(),
+        "population_initialization": population_initialization,
         **_provenance(),
         **config.scientific_configuration(),
         "seed_derivation": {
@@ -369,6 +403,7 @@ def _run_loop(
     generation_rows: list[dict[str, Any]],
     candidate_rows: list[dict[str, Any]],
     best_state: dict[str, Any] | None,
+    population_initialization: dict[str, Any],
     progress: Callable[[str], None] | None,
 ) -> Path:
     if next_generation > config.generation_count:
@@ -472,6 +507,7 @@ def _run_loop(
             training_fitness=best_state["training_fitness"],
             validation_fitness=best_state["validation_fitness"],
             config=config,
+            population_initialization=population_initialization,
         )
         if (
             generation == 0
@@ -485,6 +521,7 @@ def _run_loop(
                 training_fitness=best_state["training_fitness"],
                 validation_fitness=best_state["validation_fitness"],
                 config=config,
+                population_initialization=population_initialization,
             )
 
         population = next_population
@@ -495,6 +532,7 @@ def _run_loop(
             generation_rows=generation_rows,
             candidate_rows=candidate_rows,
             best_state=best_state,
+            population_initialization=population_initialization,
         )
         _save_checkpoint(destination / "evolution-state.pt", checkpoint)
         _write_outputs(
@@ -549,11 +587,13 @@ def run_evolution(
     if destination.exists() and any(destination.iterdir()):
         raise FileExistsError(f"evolution result directory is not empty: {destination}")
     destination.mkdir(parents=True, exist_ok=True)
+    population_initialization = _fresh_population_initialization()
     manifest = _initial_manifest(
         config,
         destination=destination,
         created_at=created_at,
         cli_arguments=cli_arguments,
+        population_initialization=population_initialization,
     )
     (destination / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True),
@@ -568,6 +608,7 @@ def run_evolution(
         generation_rows=[],
         candidate_rows=[],
         best_state=None,
+        population_initialization=population_initialization,
         progress=progress,
     )
 
@@ -597,6 +638,8 @@ def resume_evolution(
     destination = Path(state["checkpoint_path"]).parent
     manifest_path = destination / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    population_initialization = _saved_population_initialization(state)
+    manifest.setdefault("population_initialization", population_initialization)
     manifest["status"] = "running"
     manifest["completed_at_utc"] = None
     manifest["generation_count_target"] = generation_count
@@ -622,5 +665,6 @@ def resume_evolution(
         generation_rows=list(state["generation_rows"]),
         candidate_rows=list(state["candidate_rows"]),
         best_state=state["best_state"],
+        population_initialization=population_initialization,
         progress=progress,
     )

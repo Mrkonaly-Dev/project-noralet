@@ -60,6 +60,8 @@ _BRAIN_EXPORTS = frozenset(
         "AutonomousSimulationRunner",
         "AutonomousTickResult",
         "BaseBrain",
+        "BASE_BRAIN_INITIALIZATION_VERSION",
+        "BaseBrainInitializationConfig",
         "BrainActionSelection",
         "BrainActionParameters",
         "ExperienceEncoder",
@@ -76,6 +78,7 @@ _BRAIN_EXPORTS = frozenset(
         "SignalMotorChoice",
         "homeostatic_drive",
         "homeostatic_modulation",
+        "base_brain_initialization_manifest",
         "resolve_brain_device",
     )
 )
@@ -103,6 +106,8 @@ __all__ = [
     "AutonomousSimulationRunner",
     "AutonomousTickResult",
     "BaseBrain",
+    "BASE_BRAIN_INITIALIZATION_VERSION",
+    "BaseBrainInitializationConfig",
     "BrainActionSelection",
     "BrainActionParameters",
     "ConsumableEnergyPoint",
@@ -162,6 +167,7 @@ __all__ = [
     "condition_after_tick",
     "homeostatic_drive",
     "homeostatic_modulation",
+    "base_brain_initialization_manifest",
     "mortality_hazard",
     "natural_death_probability",
     "resolve_brain_device",

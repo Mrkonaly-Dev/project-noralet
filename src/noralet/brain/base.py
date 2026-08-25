@@ -10,12 +10,16 @@ from collections.abc import Mapping
 import torch
 from torch import Tensor
 
-from noralet.brain.config import NoraletBrainConfig, resolve_brain_device
+from noralet.brain.config import (
+    NoraletBrainConfig,
+    base_brain_initialization_manifest,
+    resolve_brain_device,
+)
 from noralet.brain.learning import (
     NoraletHomeostaticPlasticityConfig,
     NoraletLearningConfig,
 )
-from noralet.brain.model import NoraletBrainModel
+from noralet.brain.model import SIGNAL_MOTOR_OUTCOME_COUNT, NoraletBrainModel
 from noralet.noralets.actuators import NoraletActuatorConfig
 from noralet.noralets.experience import NoraletExperienceConfig
 from noralet.noralets.signals import NoraletSignalConfig
@@ -23,6 +27,8 @@ from noralet.noralets.signals import NoraletSignalConfig
 
 _BASE_BRAIN_SEED_DOMAIN = b"project-noralet:base-brain:v1\0"
 _PREDICTOR_SEED_DOMAIN = b"project-noralet:base-brain:predictor:v1\0"
+_RECURRENT_SEED_DOMAIN = b"project-noralet:base-brain:recurrent:neutral-v2\0"
+_ACCELERATION_SEED_DOMAIN = b"project-noralet:base-brain:acceleration:neutral-v2\0"
 
 
 class BaseBrain:
@@ -93,6 +99,14 @@ class BaseBrain:
             config.base_brain_seed,
             _BASE_BRAIN_SEED_DOMAIN,
         )
+        self._initialize_recurrent_core(
+            prototype,
+            config.base_brain_seed,
+        )
+        self._initialize_action_baselines(
+            prototype,
+            config,
+        )
         if prototype.prediction_model is not None:
             self._initialize_parameters(
                 tuple(prototype.prediction_model.parameters()),
@@ -107,6 +121,12 @@ class BaseBrain:
         """Return the observer-side prototype module."""
 
         return self._prototype
+
+    @property
+    def initialization_manifest(self) -> dict[str, object]:
+        """Describe the initializer used before any explicit genome load."""
+
+        return base_brain_initialization_manifest(self.config.initialization)
 
     def parameter_snapshot(self) -> tuple[Tensor, ...]:
         """Return detached CPU copies of all prototype parameters."""
@@ -196,11 +216,7 @@ class BaseBrain:
         )
 
     @staticmethod
-    def _initialize_parameters(
-        parameters: tuple[torch.nn.Parameter, ...],
-        seed: int,
-        domain: bytes,
-    ) -> None:
+    def _seeded_generator(seed: int, domain: bytes) -> torch.Generator:
         digest = hashlib.sha256()
         digest.update(domain)
         digest.update(str(seed).encode("ascii"))
@@ -208,8 +224,69 @@ class BaseBrain:
         generator.manual_seed(
             int.from_bytes(digest.digest()[:8], byteorder="big", signed=False)
         )
+        return generator
+
+    @classmethod
+    def _initialize_parameters(
+        cls,
+        parameters: tuple[torch.nn.Parameter, ...],
+        seed: int,
+        domain: bytes,
+    ) -> None:
+        generator = cls._seeded_generator(seed, domain)
         with torch.no_grad():
             for parameter in parameters:
                 fan = parameter.shape[-1] if parameter.ndim > 1 else parameter.numel()
                 bound = 1.0 / math.sqrt(max(1, fan))
                 parameter.uniform_(-bound, bound, generator=generator)
+
+    @classmethod
+    def _initialize_recurrent_core(
+        cls,
+        prototype: NoraletBrainModel,
+        seed: int,
+    ) -> None:
+        """Use neutral biases and standard stable GRU matrix initialization."""
+
+        generator = cls._seeded_generator(seed, _RECURRENT_SEED_DOMAIN)
+        recurrent = prototype.recurrent_core
+        with torch.no_grad():
+            for gate in recurrent.weight_ih.chunk(3, dim=0):
+                torch.nn.init.xavier_uniform_(gate, generator=generator)
+            for gate in recurrent.weight_hh.chunk(3, dim=0):
+                torch.nn.init.orthogonal_(gate, generator=generator)
+            recurrent.bias_ih.zero_()
+            recurrent.bias_hh.zero_()
+
+    @classmethod
+    def _initialize_action_baselines(
+        cls,
+        prototype: NoraletBrainModel,
+        config: NoraletBrainConfig,
+    ) -> None:
+        """Set content-free motor priors without changing runtime sampling."""
+
+        initialization = config.initialization
+        generator = cls._seeded_generator(
+            config.base_brain_seed,
+            _ACCELERATION_SEED_DOMAIN,
+        )
+        consume_logit = math.log(
+            initialization.initial_consume_probability
+            / (1.0 - initialization.initial_consume_probability)
+        )
+        emission_count = SIGNAL_MOTOR_OUTCOME_COUNT - 1
+        none_logit = math.log(1.0 - initialization.initial_signal_probability)
+        emission_logit = math.log(
+            initialization.initial_signal_probability / emission_count
+        )
+        with torch.no_grad():
+            prototype.acceleration_head.weight.uniform_(
+                -initialization.acceleration_output_weight_scale,
+                initialization.acceleration_output_weight_scale,
+                generator=generator,
+            )
+            prototype.acceleration_head.bias.zero_()
+            prototype.consume_head.bias.fill_(consume_logit)
+            prototype.signal_head.bias[0] = none_logit
+            prototype.signal_head.bias[1:].fill_(emission_logit)

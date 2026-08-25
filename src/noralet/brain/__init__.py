@@ -1,7 +1,13 @@
 """Neural control substrate for autonomous Noralets."""
 
 from noralet.brain.base import BaseBrain
-from noralet.brain.config import NoraletBrainConfig, resolve_brain_device
+from noralet.brain.config import (
+    BASE_BRAIN_INITIALIZATION_VERSION,
+    BaseBrainInitializationConfig,
+    NoraletBrainConfig,
+    base_brain_initialization_manifest,
+    resolve_brain_device,
+)
 from noralet.brain.coordinator import (
     AutonomousSimulationRunner,
     AutonomousTickResult,
@@ -38,6 +44,8 @@ __all__ = [
     "AutonomousSimulationRunner",
     "AutonomousTickResult",
     "BaseBrain",
+    "BASE_BRAIN_INITIALIZATION_VERSION",
+    "BaseBrainInitializationConfig",
     "BrainActionSelection",
     "BrainActionParameters",
     "ExperienceEncoder",
@@ -54,5 +62,6 @@ __all__ = [
     "SignalMotorChoice",
     "homeostatic_drive",
     "homeostatic_modulation",
+    "base_brain_initialization_manifest",
     "resolve_brain_device",
 ]
